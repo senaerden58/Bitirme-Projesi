@@ -1,47 +1,62 @@
 import { HapticTab } from "@/components/haptic-tab";
-import { IconSymbol } from "@/components/ui/icon-symbol";
-import { Colors } from "@/constants/theme";
-import { useColorScheme } from "@/hooks/use-color-scheme";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { Tabs } from "expo-router";
 import React from "react";
 
-export default function TabLayout() {
-  const colorScheme = useColorScheme();
+const ACTIVE = "#604df6";
+const INACTIVE = "#7b8296";
 
+const icons = {
+  index: "home-variant",
+  index1: "chat-processing",
+  profile: "account-outline",
+} as const;
+
+export default function TabLayout() {
   return (
     <Tabs
       screenOptions={{
-        tabBarActiveTintColor: Colors[colorScheme ?? "light"].tint,
         headerShown: false,
         tabBarButton: HapticTab,
+        tabBarActiveTintColor: ACTIVE,
+        tabBarInactiveTintColor: INACTIVE,
+        tabBarStyle: {
+          height: 78,
+          paddingTop: 8,
+          paddingBottom: 12,
+          borderTopWidth: 0,
+          backgroundColor: "#fff",
+          elevation: 0,
+          shadowOpacity: 0,
+        },
+        tabBarLabelStyle: {
+          fontSize: 11,
+          fontWeight: "700",
+          marginTop: 2,
+        },
       }}
     >
       <Tabs.Screen
         name="index"
         options={{
-          title: "Home",
-          tabBarIcon: ({ color }) => (
-            <IconSymbol size={28} name="house.fill" color={color} />
+          title: "Ana Sayfa",
+          tabBarIcon: ({ color, focused }) => (
+            <MaterialCommunityIcons name={focused ? "home-variant" : icons.index} size={26} color={color} />
           ),
         }}
       />
       <Tabs.Screen
         name="index1"
         options={{
-          title: "Community",
-          tabBarIcon: ({ color, focused }) => (
-            <MaterialCommunityIcons name="forum" size={28} color={color} />
-          ),
+          title: "Sohbet",
+          tabBarIcon: ({ color }) => <MaterialCommunityIcons name={icons.index1} size={26} color={color} />,
         }}
       />
       <Tabs.Screen
-        name="explore"
+        name="profile"
         options={{
-          title: "Explore",
-          tabBarIcon: ({ color }) => (
-            <IconSymbol size={28} name="paperplane.fill" color={color} />
-          ),
+          title: "Profil",
+          tabBarIcon: ({ color }) => <MaterialCommunityIcons name={icons.profile} size={26} color={color} />,
         }}
       />
     </Tabs>
