@@ -264,6 +264,57 @@ app.get("/users/:userId/emotion-summary", async (req, res) => {
   }
 });
 
+app.post("/users/:userId/journal", async (req, res) => {
+  const { mood = null, text, type = "journal" } = req.body;
+
+  if (!text || !String(text).trim()) {
+    return res.status(400).json({ error: "text is required" });
+  }
+
+  try {
+    const docRef = await db
+      .collection("users")
+      .doc(req.params.userId)
+      .collection("journalEntries")
+      .add({
+        mood,
+        text: String(text).trim(),
+        type,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+    res.json({ id: docRef.id, saved: true });
+  } catch (err) {
+    console.log("ERROR:", err);
+    res.status(500).json({ error: "Journal save error" });
+  }
+});
+
+app.post("/users/:userId/goals", async (req, res) => {
+  const { title } = req.body;
+
+  if (!title || !String(title).trim()) {
+    return res.status(400).json({ error: "title is required" });
+  }
+
+  try {
+    const docRef = await db
+      .collection("users")
+      .doc(req.params.userId)
+      .collection("goals")
+      .add({
+        completed: false,
+        title: String(title).trim(),
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+    res.json({ id: docRef.id, saved: true });
+  } catch (err) {
+    console.log("ERROR:", err);
+    res.status(500).json({ error: "Goal save error" });
+  }
+});
+
 app.listen(3000, "0.0.0.0", () => {
   console.log("Server 3000 portunda calisiyor");
 });
