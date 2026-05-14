@@ -3,9 +3,248 @@ const cors = require("cors");
 const { admin, db, projectId } = require("./firebase/firebaseAdmin");
 
 const app = express();
+const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL || "";
+const N8N_WEBHOOK_METHOD = "POST";
+const N8N_TIMEOUT_MS = Number(process.env.N8N_TIMEOUT_MS || 30000);
+const N8N_RETRY_COUNT = Number(process.env.N8N_RETRY_COUNT || 3);
+const N8N_RETRY_DELAY_MS = Number(process.env.N8N_RETRY_DELAY_MS || 1200);
+const EMOTION_SERVICE_URL =
+  process.env.EMOTION_SERVICE_URL || "http://127.0.0.1:8000/predict";
+const EMOTION_TIMEOUT_MS = Number(process.env.EMOTION_TIMEOUT_MS || 2500);
+const EMOTION_RETRY_COUNT = Number(process.env.EMOTION_RETRY_COUNT || 4);
+const EMOTION_RETRY_DELAY_MS = Number(
+  process.env.EMOTION_RETRY_DELAY_MS || 300,
+);
 
 app.use(cors());
 app.use(express.json());
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function safeJsonParse(rawText) {
+  if (!rawText) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(rawText);
+  } catch {
+    return null;
+  }
+}
+
+function extractAssistantReply(payload) {
+  if (payload == null) {
+    return null;
+  }
+
+  if (typeof payload === "string") {
+    const text = payload.trim();
+    return text.length > 0 ? text : null;
+  }
+
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const found = extractAssistantReply(item);
+      if (found) {
+        return found;
+      }
+    }
+    return null;
+  }
+
+  if (typeof payload === "object") {
+    const preferredKeys = [
+      "assistantReply",
+      "aiReply",
+      "reply",
+      "response",
+      "message",
+      "output",
+      "text",
+      "content",
+      "data",
+    ];
+
+    for (const key of preferredKeys) {
+      if (key in payload) {
+        const found = extractAssistantReply(payload[key]);
+        if (found) {
+          return found;
+        }
+      }
+    }
+
+    for (const value of Object.values(payload)) {
+      const found = extractAssistantReply(value);
+      if (found) {
+        return found;
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractPayloadField(payload, fieldName) {
+  if (payload == null) {
+    return null;
+  }
+
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const found = extractPayloadField(item, fieldName);
+      if (found != null) {
+        return found;
+      }
+    }
+    return null;
+  }
+
+  if (typeof payload === "object") {
+    if (payload[fieldName] != null) {
+      return payload[fieldName];
+    }
+
+    for (const key of ["response", "data", "body", "json"]) {
+      if (key in payload) {
+        const found = extractPayloadField(payload[key], fieldName);
+        if (found != null) {
+          return found;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+async function notifyN8n(payload) {
+  if (!N8N_WEBHOOK_URL) {
+    return null;
+  }
+
+  for (let attempt = 1; attempt <= N8N_RETRY_COUNT; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), N8N_TIMEOUT_MS);
+
+    try {
+      const useGet = N8N_WEBHOOK_METHOD === "GET";
+      const url = new URL(N8N_WEBHOOK_URL);
+      const requestOptions = {
+        method: useGet ? "GET" : "POST",
+        signal: controller.signal,
+      };
+
+      if (useGet) {
+        for (const [key, value] of Object.entries(payload)) {
+          if (value == null) continue;
+          if (
+            typeof value === "string" ||
+            typeof value === "number" ||
+            typeof value === "boolean"
+          ) {
+            url.searchParams.set(key, String(value));
+          }
+        }
+        url.searchParams.set("payload", JSON.stringify(payload));
+      } else {
+        requestOptions.headers = {
+          "Content-Type": "application/json",
+        };
+        requestOptions.body = JSON.stringify(payload);
+      }
+
+      const response = await fetch(url, requestOptions);
+
+      if (!response.ok) {
+        const error = new Error(`n8n webhook failed: ${response.status}`);
+        error.status = response.status;
+        throw error;
+      }
+
+      const responseText = (await response.text()).trim();
+      const responseJson = safeJsonParse(responseText);
+      const assistantReply =
+        extractAssistantReply(responseJson) ||
+        extractAssistantReply(responseText);
+
+      return {
+        sent: true,
+        status: response.status,
+        response: responseJson,
+        responseText: responseText || null,
+        assistantReply,
+        attempts: attempt,
+      };
+    } catch (err) {
+      const status = err?.status;
+      const retryable =
+        err?.name === "AbortError" ||
+        status === 408 ||
+        status === 429 ||
+        status === 500 ||
+        status === 502 ||
+        status === 503 ||
+        status === 504;
+
+      if (attempt < N8N_RETRY_COUNT && retryable) {
+        await sleep(N8N_RETRY_DELAY_MS * attempt);
+        continue;
+      }
+
+      if (err?.name === "AbortError") {
+        return {
+          sent: false,
+          error: `n8n webhook timeout (${N8N_TIMEOUT_MS}ms)`,
+          attempts: attempt,
+        };
+      }
+
+      console.log("N8N ERROR:", err);
+      return {
+        sent: false,
+        error: err.message,
+        status,
+        attempts: attempt,
+      };
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
+function buildAutomationPayload({
+  analysisMode,
+  conversationId,
+  finalEmotion,
+  message,
+  modalities,
+  option,
+  recommendation,
+  userId,
+}) {
+  return {
+    event: "emotion_analysis_completed",
+    version: "1.0",
+    option,
+    analysisMode,
+    promptText: message,
+    text: message,
+    message,
+    emotion: finalEmotion?.emotion,
+    confidence: finalEmotion?.confidence,
+    supportedModes: ["text", "voice_text", "voice_text_image"],
+    userId,
+    conversationId,
+    finalEmotion,
+    modalities,
+    recommendation,
+    createdAt: new Date().toISOString(),
+  };
+}
 
 app.get("/", (req, res) => {
   res.json({
@@ -27,6 +266,12 @@ app.get("/test-db", async (req, res) => {
     res.send("Firebase hata ❌");
   }
 });
+
+console.log(
+  N8N_WEBHOOK_URL
+    ? `N8N webhook aktif: ${N8N_WEBHOOK_METHOD} ${N8N_WEBHOOK_URL}`
+    : "N8N webhook kapali: N8N_WEBHOOK_URL bos.",
+);
 
 function buildRecommendation(emotion, confidence) {
   const normalizedEmotion = String(emotion || "neutral").toLowerCase();
@@ -89,20 +334,46 @@ function buildRecommendation(emotion, confidence) {
   return response;
 }
 
-async function predictEmotion(message) {
-  const emotionRes = await fetch("http://localhost:8000/predict", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ text: message }),
-  });
+async function predictEmotionOnce(message) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), EMOTION_TIMEOUT_MS);
 
-  if (!emotionRes.ok) {
-    throw new Error(`Emotion service failed: ${emotionRes.status}`);
+  try {
+    const emotionRes = await fetch(EMOTION_SERVICE_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      signal: controller.signal,
+      body: JSON.stringify({ text: message }),
+    });
+
+    if (!emotionRes.ok) {
+      throw new Error(`Emotion service failed: ${emotionRes.status}`);
+    }
+
+    return emotionRes.json();
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function predictEmotion(message) {
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= EMOTION_RETRY_COUNT; attempt += 1) {
+    try {
+      return await predictEmotionOnce(message);
+    } catch (err) {
+      lastError = err;
+
+      if (attempt < EMOTION_RETRY_COUNT) {
+        await sleep(EMOTION_RETRY_DELAY_MS * attempt);
+      }
+    }
   }
 
-  return emotionRes.json();
+  throw lastError || new Error("Emotion service is unavailable");
 }
 
 async function saveChatLog({
@@ -192,10 +463,84 @@ app.post("/recommendation", async (req, res) => {
   }
 
   try {
-    const emotionData = await predictEmotion(message);
-    const emotion = emotionData.emotion || "neutral";
-    const confidence = emotionData.confidence ?? null;
-    const recommendation = buildRecommendation(emotion, confidence);
+    let emotionData;
+
+    try {
+      emotionData = await predictEmotion(message);
+    } catch (emotionErr) {
+      console.log(
+        "Emotion service error, neutral fallback used:",
+        emotionErr?.message || emotionErr,
+      );
+      emotionData = {
+        emotion: "neutral",
+        confidence: null,
+        fallback: true,
+        error: emotionErr?.message || String(emotionErr),
+      };
+    }
+
+    const baseEmotion = emotionData.emotion || "neutral";
+    const baseConfidence = emotionData.confidence ?? null;
+    let recommendation = buildRecommendation(baseEmotion, baseConfidence);
+    const automation = await notifyN8n(
+      buildAutomationPayload({
+        analysisMode: "text",
+        conversationId,
+        finalEmotion: {
+          emotion: recommendation.emotion,
+          confidence: recommendation.confidence,
+        },
+        message,
+        modalities: {
+          text: {
+            input: message,
+            emotion: emotionData.emotion || recommendation.emotion,
+            confidence: emotionData.confidence ?? recommendation.confidence,
+            raw: emotionData,
+          },
+        },
+        option: "1-text",
+        recommendation,
+        userId,
+      }),
+    );
+    console.log(
+      "N8N TEXT:",
+      automation
+        ? {
+            sent: automation.sent,
+            status: automation.status,
+            error: automation.error,
+            hasAssistantReply: Boolean(automation.assistantReply),
+            responseText: automation.responseText,
+            response: automation.response,
+          }
+        : "not configured",
+    );
+
+    const activity = extractPayloadField(automation, "activity");
+    const movie = extractPayloadField(automation, "movie");
+    const book = extractPayloadField(automation, "book");
+    const spotify = extractPayloadField(automation, "spotify");
+    const emotion = extractPayloadField(automation, "emotion");
+    const confidence = extractPayloadField(automation, "confidence");
+    const assistantReply =
+      automation?.assistantReply ||
+      extractPayloadField(automation, "message") ||
+      extractPayloadField(automation, "text");
+
+    recommendation = {
+      ...recommendation,
+      ...(assistantReply ? { tavsiye: assistantReply } : {}),
+      ...(emotion ? { emotion } : {}),
+      ...(confidence != null ? { confidence } : {}),
+      ...(activity ? { aktivite: activity, activity } : {}),
+      ...(movie ? { movie } : {}),
+      ...(book ? { book } : {}),
+      ...(spotify ? { spotify } : {}),
+    };
+
     const saved = await saveChatLog({
       conversationId,
       emotionData,
@@ -208,6 +553,9 @@ app.post("/recommendation", async (req, res) => {
       ...recommendation,
       conversationId,
       saved: true,
+      assistantReply: assistantReply || null,
+      n8nMissingAssistantReply: !automation?.assistantReply,
+      automation,
       ...saved,
     });
   } catch (err) {

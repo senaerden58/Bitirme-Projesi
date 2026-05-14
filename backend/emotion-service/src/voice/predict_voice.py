@@ -1,149 +1,161 @@
 # -*- coding: utf-8 -*-
+from pathlib import Path
+import os
+
+import numpy as np
+import soundfile as sf
 import torch
 import torch.nn as nn
-import numpy as np
-import librosa
-import sounddevice as sd
-import matplotlib.pyplot as plt
+import torchaudio
+from faster_whisper.audio import decode_audio
+from transformers import WavLMConfig, WavLMModel
 
-# -----------------------
-# CNN Model (DeepCNN)
-# -----------------------
-class DeepCNN(nn.Module):
-    def __init__(self, num_classes=8, flatten_size=2880):
-        super().__init__()
-        self.conv1 = nn.Conv2d(1, 16, 3, padding=1)
-        self.bn1 = nn.BatchNorm2d(16)
-        self.conv2 = nn.Conv2d(16, 32, 3, padding=1)
-        self.bn2 = nn.BatchNorm2d(32)
-        self.conv3 = nn.Conv2d(32, 64, 3, padding=1)
-        self.bn3 = nn.BatchNorm2d(64)
-        self.pool = nn.MaxPool2d(2,2)
-        self.dropout = nn.Dropout(0.3)
-        self.fc1 = nn.Linear(flatten_size, 128)
-        self.fc2 = nn.Linear(128, num_classes)
-        self.relu = nn.ReLU()
-
-    def forward(self, x):
-        x = self.relu(self.bn1(self.conv1(x)))
-        x = self.pool(x)
-        x = self.relu(self.bn2(self.conv2(x)))
-        x = self.pool(x)
-        x = self.relu(self.bn3(self.conv3(x)))
-        x = self.pool(x)
-        x = x.view(x.size(0), -1)
-        x = self.dropout(self.relu(self.fc1(x)))
-        x = self.fc2(x)
-        return x
-
-# -----------------------
-# Ayarlar ve Model Yükleme
-# -----------------------
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model_path = "C:/Users/MONSTER/Desktop/emotion/models/seswav.pt"
-model = DeepCNN()
-model.load_state_dict(torch.load(model_path, map_location=device))
-model.to(device)
-model.eval()
 
 SAMPLE_RATE = 16000
-WINDOW_SIZE = 1  # saniye
-STRIDE = 0.5
+MIN_AUDIO_SECONDS = 1
+CHUNK_SECONDS = 5
 
-# -----------------------
-# Ses kaydı
-# -----------------------
-def record_audio(duration=WINDOW_SIZE, sr=SAMPLE_RATE):
-    print("Konuşmaya hazır, lütfen konuşun...")
-    audio = sd.rec(int(duration*sr), samplerate=sr, channels=1, dtype='float32')
-    sd.wait()
-    return audio.flatten()
-
-# -----------------------
-# MFCC çıkarma (sliding window)
-# -----------------------
-def extract_mfcc_chunks(audio, sr=SAMPLE_RATE, n_mfcc=40, window_size=WINDOW_SIZE, stride=STRIDE):
-    window_samples = int(window_size*sr)
-    stride_samples = int(stride*sr)
-
-    if len(audio) < window_samples:
-        audio = np.pad(audio, (0, window_samples - len(audio)))
-
-    chunks = []
-    for start in range(0, len(audio)-window_samples+1, stride_samples):
-        chunk = audio[start:start+window_samples]
-        chunk = (chunk - np.mean(chunk)) / (np.std(chunk)+1e-9)
-        mfcc = librosa.feature.mfcc(y=chunk, sr=sr, n_mfcc=n_mfcc)
-        # padding eksiğe göre
-        if mfcc.shape[1] < 72:
-            mfcc = np.pad(mfcc, ((0,0),(0,72-mfcc.shape[1])), mode='constant')
-        chunks.append(mfcc)
-    return chunks
-
-# -----------------------
-# Duygu Map
-# -----------------------
-emotion_map = {
+EMOTION_MAP = {
     0: "neutral",
     1: "calm",
     2: "happy",
-    3: "sad",
-    4: "angry",
-    5: "fearful",
+    3: "sadness",
+    4: "anger",
+    5: "fear",
     6: "disgust",
-    7: "surprised"
+    7: "surprise",
 }
 
-# -----------------------
-# Tahmin ve Görselleştirme
-# -----------------------
+MODEL_PATH = Path(__file__).resolve().parents[2] / "models" / "seswav.pt"
+USE_CUDA = os.getenv("USE_CUDA", "0").strip().lower() in {"1", "true", "yes", "on"}
+DEVICE_NAME = "cuda" if USE_CUDA and torch.cuda.is_available() else "cpu"
+device = torch.device(DEVICE_NAME)
+
+
+class EmotionModel(nn.Module):
+    def __init__(self, num_classes=8):
+        super().__init__()
+        self.wavlm = WavLMModel(WavLMConfig())
+        self.classifier = nn.Sequential(
+            nn.Linear(768, 256),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(256, num_classes),
+        )
+
+    def forward(self, x):
+        out = self.wavlm(input_values=x)
+        x = out.last_hidden_state.mean(dim=1)
+        return self.classifier(x)
+
+
+model = EmotionModel()
+model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+model.to(device)
+model.eval()
+
+
+def load_audio_file(file_path):
+    try:
+        waveform, sr = torchaudio.load(file_path)
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0, keepdim=True)
+
+        if sr != SAMPLE_RATE:
+            waveform = torchaudio.functional.resample(waveform, sr, SAMPLE_RATE)
+
+        audio = waveform.squeeze(0).numpy()
+    except Exception as torchaudio_error:
+        try:
+            audio, sr = sf.read(file_path, dtype="float32")
+
+            if audio.ndim > 1:
+                audio = audio.mean(axis=1)
+
+            if sr != SAMPLE_RATE:
+                waveform = torch.tensor(audio, dtype=torch.float32).unsqueeze(0)
+                audio = (
+                    torchaudio.functional.resample(waveform, sr, SAMPLE_RATE)
+                    .squeeze(0)
+                    .numpy()
+                )
+        except Exception as soundfile_error:
+            try:
+                audio = decode_audio(file_path, sampling_rate=SAMPLE_RATE)
+            except Exception as decode_error:
+                raise RuntimeError(
+                    "Ses dosyasi okunamadi."
+                    f" torchaudio: {torchaudio_error};"
+                    f" soundfile: {soundfile_error};"
+                    f" decode_audio: {decode_error}"
+                ) from decode_error
+
+    return normalize_audio(audio.astype(np.float32))
+
+
+def normalize_audio(audio):
+    if len(audio) == 0:
+        raise ValueError("Ses dosyasi bos.")
+
+    audio = audio - float(np.mean(audio))
+    std = float(np.std(audio))
+
+    if std > 1e-9:
+        audio = audio / std
+
+    minimum_samples = SAMPLE_RATE * MIN_AUDIO_SECONDS
+    if len(audio) < minimum_samples:
+        audio = np.pad(audio, (0, minimum_samples - len(audio)))
+
+    return audio.astype(np.float32)
+
+
+def split_audio(audio):
+    chunk_samples = SAMPLE_RATE * CHUNK_SECONDS
+
+    if len(audio) <= chunk_samples:
+        return [audio]
+
+    chunks = []
+    for start in range(0, len(audio), chunk_samples):
+        chunk = audio[start : start + chunk_samples]
+        if len(chunk) >= SAMPLE_RATE:
+            chunks.append(chunk)
+
+    return chunks
+
+
 def predict_audio_emotions_with_probs(audio):
-    chunks = extract_mfcc_chunks(audio)
+    chunks = split_audio(audio)
 
-    if len(chunks) == 0:
-        print("⚠️ Chunk üretilmedi, ses çok kısa veya ayarlar yanlış.")
-        return None
+    if not chunks:
+        raise ValueError("Ses cok kisa veya parcalara ayrilamadi.")
 
-    all_preds = []
     all_probs = []
 
-    for i, mfcc in enumerate(chunks):
-        mfcc_tensor = torch.tensor(mfcc[np.newaxis, np.newaxis, :, :], dtype=torch.float32).to(device)
-        with torch.no_grad():
-            output = model(mfcc_tensor)
-            probs = torch.softmax(output, dim=1).cpu().numpy().flatten()
-            pred_idx = np.argmax(probs)
+    for chunk in chunks:
+        input_values = torch.tensor(chunk, dtype=torch.float32).unsqueeze(0).to(device)
 
-            all_preds.append(pred_idx)
+        with torch.no_grad():
+            output = model(input_values)
+            probs = torch.softmax(output, dim=1).cpu().numpy().flatten()
             all_probs.append(probs)
 
-            print(f"Chunk {i+1}: {[(emotion_map[j], round(p,2)) for j,p in enumerate(probs)]}")
+    avg_probs = np.mean(np.array(all_probs), axis=0)
+    pred_idx = int(np.argmax(avg_probs))
 
-    # Mod ile genel tahmin
-    final_pred_idx = max(set(all_preds), key=all_preds.count)
-    final_pred_label = emotion_map[final_pred_idx]
+    return {
+        "emotion": EMOTION_MAP[pred_idx],
+        "confidence": round(float(avg_probs[pred_idx]), 4),
+        "probabilities": {
+            EMOTION_MAP[index]: round(float(probability), 4)
+            for index, probability in enumerate(avg_probs)
+        },
+        "chunks": len(chunks),
+        "model": "wavlm",
+    }
 
-    # Grafik
-    all_probs = np.array(all_probs)
-    plt.figure(figsize=(12,4))
-    for j in range(len(emotion_map)):
-        plt.plot(all_probs[:, j], label=emotion_map[j])
-    plt.xlabel("Chunk Numarası")
-    plt.ylabel("Olasılık")
-    plt.title(f"Chunk Bazlı Duygu Olasılıkları\nGenel Tahmin: {final_pred_label}")
-    plt.legend()
-    plt.grid(True)
-    plt.show()
 
-    return final_pred_label
-
-# -----------------------
-# Kullanım
-# -----------------------
-audio = record_audio()
-final_emotion = predict_audio_emotions_with_probs(audio)
-print("🎯 Sesin genel tahmini:", final_emotion)
-chunks = extract_mfcc_chunks(audio)
-print("Chunk sayısı:", len(chunks))
-for i, c in enumerate(chunks):
-    print(f"Chunk {i+1} shape: {c.shape}")
+def predict_voice_file(file_path):
+    audio = load_audio_file(file_path)
+    return predict_audio_emotions_with_probs(audio)

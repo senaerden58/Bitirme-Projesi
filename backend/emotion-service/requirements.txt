@@ -1,6 +1,11 @@
 fastapi
 uvicorn
 torch
+torchaudio
 transformers
 nltk
 pydantic
+numpy
+python-multipart
+soundfile
+faster-whisper

@@ -1,7 +1,15 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { Audio } from "expo-av";
+import {
+  AudioQuality,
+  IOSOutputFormat,
+  requestRecordingPermissionsAsync,
+  setAudioModeAsync,
+  useAudioRecorder,
+  useAudioRecorderState,
+  type RecordingOptions,
+} from "expo-audio";
 import * as ImagePicker from "expo-image-picker";
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Alert,
   FlatList,
@@ -21,11 +29,37 @@ const BG = "#f6f7ff";
 const CARD = "#ffffff";
 const INK = "#101426";
 const MUTED = "#687086";
-const SOFT = "#eef0fb";
 
 const API_URL = "http://172.20.10.2:3000/recommendation";
+const VOICE_API_URL = "http://172.20.10.2:8000/predict-voice";
+const VOICE_REQUEST_TIMEOUT_MS = 120000;
 const DEMO_USER_ID = "demo-user";
 const DEMO_CONVERSATION_ID = "demo-conversation";
+const MAX_RECORDING_SECONDS = 30;
+
+const VOICE_RECORDING_OPTIONS: RecordingOptions = {
+  extension: ".m4a",
+  sampleRate: 16000,
+  numberOfChannels: 1,
+  bitRate: 128000,
+  android: {
+    extension: ".m4a",
+    outputFormat: "mpeg4",
+    audioEncoder: "aac",
+  },
+  ios: {
+    extension: ".wav",
+    outputFormat: IOSOutputFormat.LINEARPCM,
+    audioQuality: AudioQuality.MAX,
+    linearPCMBitDepth: 16,
+    linearPCMIsBigEndian: false,
+    linearPCMIsFloat: false,
+  },
+  web: {
+    mimeType: "audio/webm",
+    bitsPerSecond: 128000,
+  },
+};
 
 type ChatMessage = {
   id: string;
@@ -35,10 +69,261 @@ type ChatMessage = {
   spotifyUrl?: string;
 };
 
+type VoiceApiResponse = {
+  emotion?: string;
+  confidence?: number | null;
+  transcript?: string;
+  assistantReply?: string | null;
+  activity?: string | null;
+  aktivite?: string | null;
+  movie?: string | null;
+  book?: string | null;
+  spotify?: string | null;
+  textEmotion?: string;
+  textConfidence?: number | null;
+  voiceEmotion?: string;
+  voiceConfidence?: number | null;
+  fusionEmotion?: string;
+  fusionConfidence?: number | null;
+  fusionDecision?: {
+    mode?: string | null;
+    winnerModality?: string | null;
+    winnerEmotion?: string | null;
+    winnerConfidence?: number | null;
+    agreement?: boolean;
+    textEmotion?: string;
+    textConfidence?: number | null;
+    voiceEmotion?: string;
+    voiceConfidence?: number | null;
+  } | null;
+};
+
 function getTime() {
   return new Date().toLocaleTimeString("tr-TR", {
     hour: "2-digit",
     minute: "2-digit",
+  });
+}
+
+function formatDuration(totalSeconds: number) {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function buildVoiceResponse(
+  emotion?: string,
+  confidence?: number | null,
+  transcript?: string,
+  details?: {
+    textEmotion?: string;
+    textConfidence?: number | null;
+    voiceEmotion?: string;
+    voiceConfidence?: number | null;
+    winnerModality?: string | null;
+    winnerEmotion?: string | null;
+    winnerConfidence?: number | null;
+    agreement?: boolean;
+  },
+) {
+  const normalizedEmotion = String(emotion || "neutral").toLowerCase();
+  const formatConfidence = (value?: number | null) =>
+    typeof value === "number" ? `%${Math.round(value * 100)}` : "-";
+  const transcriptValue = transcript?.trim() || "(Turkce net anlasilamadi)";
+
+  const detailsText =
+    `\nText duygu: ${details?.textEmotion || "-"} (${formatConfidence(details?.textConfidence)})` +
+    `\nSes duygu: ${details?.voiceEmotion || "-"} (${formatConfidence(details?.voiceConfidence)})` +
+    `\nSecilen: ${details?.winnerModality || "weighted"} -> ${details?.winnerEmotion || emotion || "neutral"} (${formatConfidence(details?.winnerConfidence ?? confidence)})` +
+    `\nUyum: ${details?.agreement === true ? "evet" : details?.agreement === false ? "hayir" : "-"}`;
+
+  let confidenceText =
+    typeof confidence === "number"
+      ? `\nGüven: %${Math.round(confidence * 100)}`
+      : "";
+
+  const transcriptText = `\n\nYaziya dokulen: ${transcriptValue}\n${detailsText}`;
+  confidenceText += transcriptText;
+
+  if (normalizedEmotion === "sadness" || normalizedEmotion === "sad") {
+    return `Ses tonundan biraz hüzün yakaladım.\n\nDuygu: sadness${confidenceText}\nÖneri: Kendine yumuşak bir mola ver; kısa bir yürüyüş veya sakin bir şarkı iyi gelebilir.`;
+  }
+
+  if (normalizedEmotion === "happy") {
+    return `Ses tonun daha pozitif geliyor.\n\nDuygu: happy${confidenceText}\nÖneri: Bu enerjiyi bugün küçük ama güzel bir şeye yönlendirebilirsin.`;
+  }
+
+  if (normalizedEmotion === "anger" || normalizedEmotion === "angry") {
+    return `Ses tonunda gerginlik algıladım.\n\nDuygu: anger${confidenceText}\nÖneri: Önce nefesini yavaşlat; sonra neye ihtiyacın olduğunu daha net seçebilirsin.`;
+  }
+
+  if (normalizedEmotion === "fear" || normalizedEmotion === "fearful") {
+    return `Ses tonunda kaygı izi olabilir.\n\nDuygu: fear${confidenceText}\nÖneri: Düşünceyi küçük parçalara ayırmak kontrol hissini güçlendirebilir.`;
+  }
+
+  return `Ses kaydını analiz ettim.\n\nDuygu: ${emotion || "neutral"}${confidenceText}\nÖneri: Kendini dinlemek için kısa ve sakin bir mola iyi gelebilir.`;
+}
+
+function buildVoiceResponseWithFusion(data: VoiceApiResponse) {
+  const finalEmotion = String(
+    data.fusionEmotion || data.emotion || "neutral",
+  ).toLowerCase();
+  const finalConfidence = data.fusionConfidence ?? data.confidence ?? null;
+  const transcript = data.transcript?.trim() || "(Turkce net anlasilamadi)";
+
+  const textEmotion = data.textEmotion || data.fusionDecision?.textEmotion || "-";
+  const textConfidence =
+    data.textConfidence ?? data.fusionDecision?.textConfidence ?? null;
+  const voiceEmotion =
+    data.voiceEmotion || data.fusionDecision?.voiceEmotion || "-";
+  const voiceConfidence =
+    data.voiceConfidence ?? data.fusionDecision?.voiceConfidence ?? null;
+  const winnerModality = data.fusionDecision?.winnerModality || "-";
+  const winnerEmotion =
+    data.fusionDecision?.winnerEmotion || data.fusionEmotion || data.emotion || "-";
+  const winnerConfidence =
+    data.fusionDecision?.winnerConfidence ??
+    data.fusionConfidence ??
+    data.confidence ??
+    null;
+  const mode = data.fusionDecision?.mode || "highest_confidence";
+  const agreement = data.fusionDecision?.agreement;
+
+  const formatConfidence = (value?: number | null) =>
+    typeof value === "number" ? `%${Math.round(value * 100)}` : "-";
+
+  let opening = "Ses kaydini analiz ettim.";
+  let recommendation =
+    "Kendini dinlemek icin kisa ve sakin bir mola iyi gelebilir.";
+
+  if (finalEmotion === "sadness" || finalEmotion === "sad") {
+    opening = "Ses tonundan biraz huzun yakaladim.";
+    recommendation =
+      "Kendine yumusak bir mola ver; kisa bir yuruyus iyi gelebilir.";
+  } else if (finalEmotion === "happy") {
+    opening = "Ses tonun daha pozitif geliyor.";
+    recommendation = "Bu enerjiyi bugun kucuk ama guzel bir seye yonlendirebilirsin.";
+  } else if (finalEmotion === "anger" || finalEmotion === "angry") {
+    opening = "Ses tonunda gerginlik algiladim.";
+    recommendation =
+      "Once nefesini yavaslat; sonra neye ihtiyacin oldugunu daha net secebilirsin.";
+  } else if (finalEmotion === "fear" || finalEmotion === "fearful") {
+    opening = "Ses tonunda kaygi izi olabilir.";
+    recommendation =
+      "Dusunceyi kucuk parcalara ayirmak kontrol hissini guclendirebilir.";
+  }
+
+  return (
+    `${opening}\n\n` +
+    `Ortak duygu: ${finalEmotion}\n` +
+    `Ortak guven: ${formatConfidence(finalConfidence)}\n\n` +
+    `Yaziya dokulen: ${transcript}\n` +
+    `Karar modu: ${mode}\n` +
+    `Text duygu: ${textEmotion} (${formatConfidence(textConfidence)})\n` +
+    `Ses duygu: ${voiceEmotion} (${formatConfidence(voiceConfidence)})\n` +
+    `Yuksek guvenli modalite: ${winnerModality} -> ${winnerEmotion} (${formatConfidence(winnerConfidence)})\n` +
+    `Uyum: ${agreement === true ? "evet" : agreement === false ? "hayir" : "-"}\n` +
+    `Oneri: ${recommendation}`
+  );
+}
+
+function buildVoiceFormData(rawUri: string) {
+  const lowerUri = rawUri.toLowerCase();
+  const isWavLike = lowerUri.endsWith(".wav") || lowerUri.endsWith(".caf");
+  const formData = new FormData();
+
+  formData.append("userId", DEMO_USER_ID);
+  formData.append("conversationId", DEMO_CONVERSATION_ID);
+  formData.append("notifyN8n", "true");
+  formData.append("audio", {
+    uri: rawUri,
+    name: isWavLike ? "voice-recording.wav" : "voice-recording.m4a",
+    type: isWavLike ? "audio/wav" : "audio/m4a",
+  } as any);
+
+  return formData;
+}
+
+function getVoiceFallbackRecommendations(emotion: string) {
+  const normalizedEmotion = emotion.toLowerCase();
+
+  if (normalizedEmotion === "anger" || normalizedEmotion === "angry") {
+    return {
+      reply:
+        "Sesinden biraz gerginlik hissettim. Önce kısa bir nefes molası iyi gelebilir.",
+      activity: "4-7-8 nefes egzersizi",
+      movie: "The Secret Life of Walter Mitty",
+      book: "Duygusal Zeka",
+      spotify: "Calm Vibes",
+    };
+  }
+
+  if (normalizedEmotion === "sadness" || normalizedEmotion === "sad") {
+    return {
+      reply:
+        "Bugün biraz yorgun veya kırgın hissetmiş olabilirsin. Kendine nazik davranman iyi gelir.",
+      activity: "Kısa bir yürüyüş",
+      movie: "Inside Out",
+      book: "Küçük Prens",
+      spotify: "Acoustic Chill",
+    };
+  }
+
+  if (normalizedEmotion === "happy") {
+    return {
+      reply: "Bu iyi enerjiyi küçük ama keyifli bir şeye yönlendirebilirsin.",
+      activity: "Sevdiğin birine mesaj at",
+      movie: "La La Land",
+      book: "Martı Jonathan Livingston",
+      spotify: "Good Vibes",
+    };
+  }
+
+  if (normalizedEmotion === "fear" || normalizedEmotion === "fearful") {
+    return {
+      reply:
+        "Kaygılı hissettiysen önce durup nefesini yavaşlatmak iyi gelebilir.",
+      activity: "Düşünce günlüğü",
+      movie: "A Beautiful Day in the Neighborhood",
+      book: "Kaygı Çağı",
+      spotify: "Peaceful Piano",
+    };
+  }
+
+  return {
+    reply: "Seni duydum. Kendine kısa ve sakin bir alan açman iyi gelebilir.",
+    activity: "Kısa bir mola",
+    movie: "Soul",
+    book: "Simyacı",
+    spotify: "Sakin Odak",
+  };
+}
+
+function uploadVoiceWithXhr(formData: FormData): Promise<VoiceApiResponse> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", VOICE_API_URL);
+    xhr.timeout = VOICE_REQUEST_TIMEOUT_MS;
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText || "{}"));
+        } catch {
+          reject(new Error("Voice service returned invalid JSON."));
+        }
+        return;
+      }
+
+      reject(new Error(`Voice service failed: ${xhr.status}`));
+    };
+
+    xhr.onerror = () => reject(new Error("Network request failed"));
+    xhr.ontimeout = () => reject(new Error("Network request timed out"));
+    xhr.onabort = () => reject(new Error("Voice upload aborted"));
+    xhr.send(formData);
   });
 }
 
@@ -55,9 +340,27 @@ export default function CommunityChat() {
   ]);
 
   const [input, setInput] = useState("");
-  const [recording, setRecording] = useState<Audio.Recording | null>(null);
   const [showActions, setShowActions] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
+  const [isStoppingRecording, setIsStoppingRecording] = useState(false);
+  const recorder = useAudioRecorder(VOICE_RECORDING_OPTIONS);
+  const recorderState = useAudioRecorderState(recorder);
+  const recording = recorderState.isRecording;
+  const recordingSeconds = Math.floor(
+    (recorderState.durationMillis || 0) / 1000,
+  );
+
+  useEffect(() => {
+    if (
+      recording &&
+      !isStoppingRecording &&
+      recordingSeconds >= MAX_RECORDING_SECONDS
+    ) {
+      void stopRecording();
+    }
+    // This effect only enforces max recording duration.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recording, recordingSeconds, isStoppingRecording]);
 
   const scrollToEnd = () => {
     setTimeout(() => {
@@ -96,11 +399,24 @@ export default function CommunityChat() {
         }),
       });
 
+      if (!res.ok) {
+        throw new Error(`Recommendation request failed: ${res.status}`);
+      }
+
       const rawData = await res.json();
       const data = Array.isArray(rawData) ? rawData[0] : rawData;
       console.log("DATA:", data);
+      const aiText =
+        (typeof data.assistantReply === "string" &&
+        data.assistantReply.trim().length > 0
+          ? data.assistantReply.trim()
+          : null) ||
+        data.tavsiye ||
+        data.message ||
+        "Seni anlıyorum.";
+
       const botText =
-        `💭 ${data.tavsiye || data.message || "Seni anlıyorum."}\n\n` +
+        `💭 ${aiText}\n\n` +
         `✨ Duygu: ${data.emotion || "neutral"}\n` +
         `🎯 Aktivite: ${data.aktivite || data.activity || "Kısa bir mola ver"}\n` +
         `🎬 Film: ${data.movie || "Soul"}\n` +
@@ -195,31 +511,130 @@ export default function CommunityChat() {
   };
 
   const startRecording = async () => {
+    if (recording || isStoppingRecording) return;
+
     try {
-      const permission = await Audio.requestPermissionsAsync();
-      if (!permission.granted) return;
+      const permission = await requestRecordingPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert(
+          "Izin gerekli",
+          "Mikrofon izni olmadan ses kaydi baslatilamaz.",
+        );
+        return;
+      }
 
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
+      await setAudioModeAsync({
+        allowsRecording: true,
+        playsInSilentMode: true,
       });
+      await recorder.prepareToRecordAsync();
+      recorder.record();
 
-      const { recording: newRecording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY,
-      );
-
-      setRecording(newRecording);
+      setShowActions(false);
     } catch (err) {
       console.log("Recording error", err);
     }
   };
 
   const stopRecording = async () => {
-    if (!recording) return;
+    if (!recording || isStoppingRecording) return;
 
-    await recording.stopAndUnloadAsync();
-    console.log("Ses kaydedildi:", recording.getURI());
-    setRecording(null);
+    setIsStoppingRecording(true);
+    let uri: string | null = null;
+
+    try {
+      await recorder.stop();
+      uri = recorder.uri || recorder.getStatus().url;
+      console.log("Ses kaydedildi:", uri);
+    } catch (err) {
+      console.log("Stop recording error", err);
+      Alert.alert("Hata", "Ses kaydi durdurulamadi.");
+      return;
+    } finally {
+      setIsStoppingRecording(false);
+    }
+
+    if (!uri) {
+      Alert.alert("Hata", "Ses kaydı alınamadı.");
+      return;
+    }
+
+    const voiceMessageId = Date.now().toString();
+
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: voiceMessageId,
+        text: "Ses kaydı gönderildi.",
+        sender: "user",
+        time: getTime(),
+      },
+    ]);
+
+    setIsTyping(true);
+    scrollToEnd();
+
+    try {
+      let data: VoiceApiResponse;
+
+      try {
+        data = await uploadVoiceWithXhr(buildVoiceFormData(uri));
+      } catch (firstError) {
+        const fallbackUri =
+          Platform.OS === "ios" && uri.startsWith("file://")
+            ? uri.replace("file://", "")
+            : uri;
+
+        if (fallbackUri !== uri) {
+          data = await uploadVoiceWithXhr(buildVoiceFormData(fallbackUri));
+        } else {
+          throw firstError;
+        }
+      }
+
+      const assistantReply =
+        typeof data.assistantReply === "string" && data.assistantReply.trim()
+          ? data.assistantReply.trim()
+          : null;
+      const emotion = String(data.emotion || "neutral").toLowerCase();
+      const fallback = getVoiceFallbackRecommendations(emotion);
+      const aiText = assistantReply || fallback.reply;
+      const activity = data.aktivite || data.activity || fallback.activity;
+      const movie = data.movie || fallback.movie;
+      const book = data.book || fallback.book;
+      const spotify = data.spotify || fallback.spotify;
+      const debugSummary = buildVoiceResponseWithFusion(data);
+      const voiceText =
+        `💭 ${aiText}\n\n` +
+        `✨ Duygu: ${emotion}\n` +
+        `🎯 Aktivite: ${activity}\n` +
+        `🎬 Film: ${movie}\n` +
+        `📚 Kitap: ${book}\n` +
+        `🎧 Spotify: ${spotify}\n\n` +
+        `---\nKontrol detayı:\n${debugSummary}`;
+      const spotifyUrl =
+        typeof data.spotify === "string" &&
+        data.spotify.includes("open.spotify.com")
+          ? data.spotify
+          : undefined;
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `${Date.now()}-voice-bot`,
+          text: voiceText,
+          sender: "bot",
+          time: getTime(),
+          spotifyUrl,
+        },
+      ]);
+    } catch (err) {
+      console.log("VOICE HATA:", err);
+      Alert.alert("Hata", "Ses analizi yapılamadı.");
+    } finally {
+      setIsTyping(false);
+      scrollToEnd();
+    }
   };
 
   const toggleVoiceAnalysis = async () => {
@@ -347,13 +762,30 @@ export default function CommunityChat() {
       )}
 
       {recording && (
-        <View style={styles.recordingBadge}>
-          <View style={styles.recordingDot} />
-          <Text style={styles.recordingText}>Ses kaydı alınıyor...</Text>
+        <View style={styles.recordingPanel}>
+          <View style={styles.recordingInfo}>
+            <View style={styles.recordingDot} />
+            <View>
+              <Text style={styles.recordingTitle}>Ses kaydı alınıyor</Text>
+              <Text style={styles.recordingText}>
+                {formatDuration(recordingSeconds)} /{" "}
+                {formatDuration(MAX_RECORDING_SECONDS)}
+              </Text>
+            </View>
+          </View>
+
+          <TouchableOpacity
+            style={styles.stopRecordingButton}
+            onPress={stopRecording}
+            activeOpacity={0.85}
+          >
+            <MaterialCommunityIcons name="stop" size={20} color="#fff" />
+            <Text style={styles.stopRecordingText}>Bitir</Text>
+          </TouchableOpacity>
         </View>
       )}
 
-      {showActions && (
+      {showActions && !recording && (
         <View style={styles.actionSheet}>
           <TouchableOpacity style={styles.actionItem} onPress={pickMedia}>
             <View style={styles.actionIcon}>
@@ -375,16 +807,14 @@ export default function CommunityChat() {
           >
             <View style={styles.actionIcon}>
               <MaterialCommunityIcons
-                name={recording ? "stop-circle-outline" : "microphone-outline"}
+                name="microphone-outline"
                 size={24}
                 color={PURPLE}
               />
             </View>
             <View>
               <Text style={styles.actionTitle}>Ses</Text>
-              <Text style={styles.actionText}>
-                {recording ? "Kaydı durdur" : "Ses kaydı başlat"}
-              </Text>
+              <Text style={styles.actionText}>Ses kaydı başlat</Text>
             </View>
           </TouchableOpacity>
         </View>
@@ -392,8 +822,13 @@ export default function CommunityChat() {
 
       <View style={styles.inputBar}>
         <TouchableOpacity
-          style={[styles.plusButton, showActions && styles.plusButtonActive]}
+          style={[
+            styles.plusButton,
+            showActions && styles.plusButtonActive,
+            recording && styles.plusButtonDisabled,
+          ]}
           onPress={() => setShowActions((value) => !value)}
+          disabled={!!recording}
         >
           <MaterialCommunityIcons
             name={showActions ? "close" : "plus"}
@@ -569,27 +1004,60 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "600",
   },
-  recordingBadge: {
-    alignSelf: "center",
+  recordingPanel: {
+    marginHorizontal: 18,
     marginBottom: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 20,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 24,
     backgroundColor: "#fff0f0",
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    justifyContent: "space-between",
+    gap: 12,
+    shadowColor: "#8f4f4f",
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    elevation: 3,
+  },
+  recordingInfo: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
   },
   recordingDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
     backgroundColor: "#ff4d4d",
+  },
+  recordingTitle: {
+    color: INK,
+    fontSize: 13,
+    fontWeight: "900",
   },
   recordingText: {
     color: "#cf3333",
     fontSize: 12,
-    fontWeight: "700",
+    fontWeight: "800",
+    marginTop: 2,
+  },
+  stopRecordingButton: {
+    minWidth: 86,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: "#e64242",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingHorizontal: 14,
+  },
+  stopRecordingText: {
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: "900",
   },
   actionSheet: {
     marginHorizontal: 18,
@@ -659,6 +1127,9 @@ const styles = StyleSheet.create({
   },
   plusButtonActive: {
     backgroundColor: PURPLE,
+  },
+  plusButtonDisabled: {
+    opacity: 0.45,
   },
   input: {
     flex: 1,
