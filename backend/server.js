@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const crypto = require("crypto");
 const { admin, db, projectId } = require("./firebase/firebaseAdmin");
 
 const app = express();
@@ -246,6 +247,57 @@ function buildAutomationPayload({
   };
 }
 
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
+  const hash = crypto
+    .pbkdf2Sync(String(password), salt, 120000, 32, "sha256")
+    .toString("hex");
+
+  return `${salt}:${hash}`;
+}
+
+function verifyPassword(password, storedHash) {
+  const [salt, expectedHash] = String(storedHash || "").split(":");
+
+  if (!salt || !expectedHash) {
+    return false;
+  }
+
+  const candidateHash = hashPassword(password, salt).split(":")[1];
+  const expected = Buffer.from(expectedHash, "hex");
+  const candidate = Buffer.from(candidateHash, "hex");
+
+  return (
+    expected.length === candidate.length &&
+    crypto.timingSafeEqual(expected, candidate)
+  );
+}
+
+function publicUser(doc) {
+  const data = doc.data() || {};
+
+  return {
+    id: doc.id,
+    email: data.email,
+    name: data.name || "Kullanici",
+    createdAt: data.createdAt || null,
+    updatedAt: data.updatedAt || null,
+  };
+}
+
+async function findUserByEmail(email) {
+  const snapshot = await db
+    .collection("users")
+    .where("email", "==", normalizeEmail(email))
+    .limit(1)
+    .get();
+
+  return snapshot.empty ? null : snapshot.docs[0];
+}
+
 app.get("/", (req, res) => {
   res.json({
     status: "API calisiyor",
@@ -264,6 +316,94 @@ app.get("/test-db", async (req, res) => {
   } catch (err) {
     console.log(err);
     res.send("Firebase hata ❌");
+  }
+});
+
+app.post("/auth/register", async (req, res) => {
+  const email = normalizeEmail(req.body.email);
+  const name = String(req.body.name || "").trim() || "Kullanici";
+  const password = String(req.body.password || "");
+
+  if (!email.includes("@")) {
+    return res.status(400).json({ error: "valid email is required" });
+  }
+
+  if (password.length < 6) {
+    return res.status(400).json({ error: "password must be at least 6 chars" });
+  }
+
+  try {
+    const existingUser = await findUserByEmail(email);
+
+    if (existingUser) {
+      return res.status(409).json({ error: "email already registered" });
+    }
+
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    const userRef = db.collection("users").doc();
+
+    await userRef.set({
+      email,
+      name,
+      passwordHash: hashPassword(password),
+      authProvider: "local",
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const user = await userRef.get();
+
+    res.json({ user: publicUser(user) });
+  } catch (err) {
+    console.log("AUTH REGISTER ERROR:", err);
+    res.status(500).json({ error: "register failed" });
+  }
+});
+
+app.post("/auth/login", async (req, res) => {
+  const email = normalizeEmail(req.body.email);
+  const password = String(req.body.password || "");
+
+  if (!email.includes("@") || !password) {
+    return res.status(400).json({ error: "email and password are required" });
+  }
+
+  try {
+    const user = await findUserByEmail(email);
+
+    if (!user || !verifyPassword(password, user.data().passwordHash)) {
+      return res.status(401).json({ error: "invalid credentials" });
+    }
+
+    await user.ref.set(
+      {
+        lastLoginAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+
+    const freshUser = await user.ref.get();
+
+    res.json({ user: publicUser(freshUser) });
+  } catch (err) {
+    console.log("AUTH LOGIN ERROR:", err);
+    res.status(500).json({ error: "login failed" });
+  }
+});
+
+app.get("/users/:userId/profile", async (req, res) => {
+  try {
+    const user = await db.collection("users").doc(req.params.userId).get();
+
+    if (!user.exists) {
+      return res.status(404).json({ error: "user not found" });
+    }
+
+    res.json({ user: publicUser(user) });
+  } catch (err) {
+    console.log("PROFILE ERROR:", err);
+    res.status(500).json({ error: "profile error" });
   }
 });
 
@@ -578,6 +718,253 @@ app.get("/users/:userId/recommendations", async (req, res) => {
   } catch (err) {
     console.log("ERROR:", err);
     res.status(500).json({ error: "Recommendation history error" });
+  }
+});
+
+app.post("/users/:userId/recommendations", async (req, res) => {
+  const {
+    activity = null,
+    aktivite = activity,
+    book = null,
+    confidence = null,
+    conversationId = "manual-analysis",
+    emotion = "neutral",
+    message = "",
+    movie = null,
+    spotify = null,
+    tavsiye = null,
+  } = req.body;
+
+  try {
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    const userRef = db.collection("users").doc(req.params.userId);
+    const conversationRef = userRef
+      .collection("conversations")
+      .doc(conversationId);
+    const userMessageRef = conversationRef.collection("messages").doc();
+    const botMessageRef = conversationRef.collection("messages").doc();
+    const recommendationRef = userRef.collection("recommendations").doc();
+
+    await db.runTransaction(async (transaction) => {
+      transaction.set(
+        userRef,
+        {
+          createdAt: now,
+          updatedAt: now,
+        },
+        { merge: true },
+      );
+
+      transaction.set(
+        conversationRef,
+        {
+          lastMessage: message,
+          lastEmotion: emotion,
+          createdAt: now,
+          updatedAt: now,
+        },
+        { merge: true },
+      );
+
+      transaction.set(userMessageRef, {
+        text: message,
+        sender: "user",
+        emotion,
+        confidence,
+        createdAt: now,
+      });
+
+      transaction.set(botMessageRef, {
+        text: tavsiye || "Analiz tamamlandı.",
+        sender: "bot",
+        emotion,
+        recommendationId: recommendationRef.id,
+        spotify,
+        createdAt: now,
+      });
+
+      transaction.set(recommendationRef, {
+        conversationId,
+        messageId: userMessageRef.id,
+        botMessageId: botMessageRef.id,
+        message,
+        emotion,
+        confidence,
+        tavsiye,
+        aktivite,
+        movie,
+        book,
+        spotify,
+        createdAt: now,
+      });
+    });
+
+    res.json({
+      botMessageId: botMessageRef.id,
+      id: recommendationRef.id,
+      messageId: userMessageRef.id,
+      saved: true,
+    });
+  } catch (err) {
+    console.log("ERROR:", err);
+    res.status(500).json({ error: "Recommendation save error" });
+  }
+});
+
+app.get("/users/:userId/conversations/:conversationId/messages", async (req, res) => {
+  try {
+    function getCreatedAtMs(data) {
+      return data.createdAt?.toDate?.()?.getTime?.() || 0;
+    }
+
+    function formatMessageTime(data) {
+      const createdAt = data.createdAt?.toDate?.();
+
+      return createdAt
+        ? createdAt.toLocaleTimeString("tr-TR", {
+            hour: "2-digit",
+            minute: "2-digit",
+          })
+        : "";
+    }
+
+    function buildBotText(data) {
+      const lines = [
+        data.tavsiye || "Analiz tamamlandı.",
+        "",
+        `Duygu: ${data.emotion || "neutral"}`,
+        `Aktivite: ${data.aktivite || data.activity || "Kısa bir mola ver"}`,
+        `Film: ${data.movie || "Soul"}`,
+        `Kitap: ${data.book || "Simyacı"}`,
+      ];
+
+      if (data.spotify) {
+        lines.push(`Spotify: ${data.spotify}`);
+      }
+
+      return lines.join("\n");
+    }
+
+    const conversationRef = db
+      .collection("users")
+      .doc(req.params.userId)
+      .collection("conversations")
+      .doc(req.params.conversationId);
+
+    const snapshot = await conversationRef
+      .collection("messages")
+      .orderBy("createdAt", "asc")
+      .limit(100)
+      .get();
+
+    const messages = snapshot.docs.map((doc) => {
+        const data = doc.data();
+
+        return {
+          createdAtMs: getCreatedAtMs(data),
+          emotion: data.emotion || null,
+          id: doc.id,
+          recommendationId: data.recommendationId || null,
+          sender: data.sender || "bot",
+          spotifyUrl: data.spotify || null,
+          text: data.text || "",
+          time: formatMessageTime(data),
+        };
+      });
+
+    const recommendationSnapshot = await db
+      .collection("users")
+      .doc(req.params.userId)
+      .collection("recommendations")
+      .where("conversationId", "==", req.params.conversationId)
+      .limit(100)
+      .get();
+    const recommendations = recommendationSnapshot.docs
+      .map((doc) => ({ id: doc.id, data: doc.data() }))
+      .sort((a, b) => getCreatedAtMs(a.data) - getCreatedAtMs(b.data));
+    const recommendationsById = new Map(
+      recommendations.map((item) => [item.id, item.data]),
+    );
+    const messageIds = new Set(messages.map((message) => message.id));
+    const botRecommendationIds = new Set(
+      messages
+        .map((message) => message.recommendationId)
+        .filter(Boolean),
+    );
+
+    for (const message of messages) {
+      if (message.sender !== "bot" || !message.recommendationId) {
+        continue;
+      }
+
+      const recommendation = recommendationsById.get(message.recommendationId);
+
+      if (recommendation) {
+        message.text = buildBotText(recommendation);
+        message.spotifyUrl = recommendation.spotify || message.spotifyUrl;
+      }
+    }
+
+    for (const { id, data } of recommendations) {
+      const hasUserMessage =
+        (data.messageId && messageIds.has(data.messageId)) ||
+        messages.some(
+          (message) =>
+            message.sender === "user" &&
+            message.text &&
+            message.text === data.message,
+        );
+      const hasBotMessage =
+        (data.botMessageId && messageIds.has(data.botMessageId)) ||
+        botRecommendationIds.has(id);
+
+      if (!hasUserMessage && data.message) {
+        messages.push({
+          createdAtMs: getCreatedAtMs(data),
+          emotion: data.emotion || null,
+          id: data.messageId || `${id}-user`,
+          recommendationId: null,
+          sender: "user",
+          spotifyUrl: null,
+          text: data.message,
+          time: formatMessageTime(data),
+        });
+      }
+
+      if (hasBotMessage || !data.tavsiye) {
+        continue;
+      }
+
+      messages.push({
+        createdAtMs: getCreatedAtMs(data) + 1,
+        emotion: data.emotion || null,
+        id: data.botMessageId || `${id}-bot`,
+        recommendationId: id,
+        sender: "bot",
+        spotifyUrl: data.spotify || null,
+        text: buildBotText(data),
+        time: formatMessageTime(data),
+      });
+    }
+
+    messages.sort((a, b) => {
+      if (a.createdAtMs !== b.createdAtMs) {
+        return a.createdAtMs - b.createdAtMs;
+      }
+
+      if (a.sender !== b.sender) {
+        return a.sender === "user" ? -1 : 1;
+      }
+
+      return String(a.id).localeCompare(String(b.id));
+    });
+
+    res.json(
+      messages.map(({ createdAtMs, emotion, recommendationId, ...message }) => message),
+    );
+  } catch (err) {
+    console.log("ERROR:", err);
+    res.status(500).json({ error: "Conversation messages error" });
   }
 });
 

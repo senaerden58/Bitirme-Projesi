@@ -9,3 +9,5 @@ numpy
 python-multipart
 soundfile
 faster-whisper
+Pillow
+opencv-python-headless

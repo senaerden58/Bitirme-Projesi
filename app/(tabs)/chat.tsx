@@ -1,4 +1,5 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
+import { useAuth } from "@/contexts/auth";
 import {
   AudioQuality,
   IOSOutputFormat,
@@ -8,6 +9,8 @@ import {
   useAudioRecorderState,
   type RecordingOptions,
 } from "expo-audio";
+import Constants from "expo-constants";
+import { Image as ExpoImage } from "expo-image";
 import * as ImagePicker from "expo-image-picker";
 import React, { useEffect, useRef, useState } from "react";
 import {
@@ -30,9 +33,30 @@ const CARD = "#ffffff";
 const INK = "#101426";
 const MUTED = "#687086";
 
-const API_URL = "http://172.20.10.2:3000/recommendation";
-const VOICE_API_URL = "http://172.20.10.2:8000/predict-voice";
+function getDevHost() {
+  const hostUri =
+    Constants.expoConfig?.hostUri ||
+    Constants.manifest2?.extra?.expoClient?.hostUri ||
+    "";
+
+  return hostUri.split(":")[0] || "127.0.0.1";
+}
+
+const DEV_HOST = getDevHost();
+const API_HOST = Platform.OS === "web" ? "127.0.0.1" : DEV_HOST;
+const LEGACY_DEVICE_HOST = "172.20.10.2";
+const MEDIA_SERVICE_HOST = Platform.OS === "web" ? "127.0.0.1" : API_HOST;
+const API_BASE_URL = `http://${API_HOST}:3000`;
+const API_URL = `${API_BASE_URL}/recommendation`;
+const VOICE_API_URLS = Array.from(
+  new Set([
+    `http://${MEDIA_SERVICE_HOST}:8000/predict-voice`,
+    `http://${LEGACY_DEVICE_HOST}:8000/predict-voice`,
+  ]),
+);
+const MEDIA_API_URL = `http://${MEDIA_SERVICE_HOST}:8000/predict-media`;
 const VOICE_REQUEST_TIMEOUT_MS = 120000;
+const MEDIA_REQUEST_TIMEOUT_MS = 120000;
 const DEMO_USER_ID = "demo-user";
 const DEMO_CONVERSATION_ID = "demo-conversation";
 const MAX_RECORDING_SECONDS = 30;
@@ -67,7 +91,101 @@ type ChatMessage = {
   sender: "user" | "bot";
   time: string;
   spotifyUrl?: string;
+  mediaUri?: string;
+  mediaType?: "image" | "video";
 };
+
+type MediaKind = "image" | "video";
+
+function getInitialMessages(name?: string): ChatMessage[] {
+  const displayName = name?.trim() || "Sena";
+
+  return [
+    {
+      id: "1",
+      text: `Merhaba ${displayName} 💜 Bugün nasıl hissediyorsun? Aklından geçenleri yaz, ben duygu durumuna göre sana küçük öneriler hazırlayayım.`,
+      sender: "bot",
+      time: getTime(),
+    },
+  ];
+}
+
+async function saveAnalysisResult({
+  activity,
+  book,
+  confidence,
+  conversationId,
+  emotion,
+  message,
+  movie,
+  spotify,
+  tavsiye,
+  userId,
+}: {
+  activity?: string | null;
+  book?: string | null;
+  confidence?: number | null;
+  conversationId: string;
+  emotion?: string | null;
+  message: string;
+  movie?: string | null;
+  spotify?: string | null;
+  tavsiye?: string | null;
+  userId: string;
+}) {
+  const response = await fetch(
+    `${API_BASE_URL}/users/${userId}/recommendations`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        activity,
+        book,
+        confidence,
+        conversationId,
+        emotion,
+        message,
+        movie,
+        spotify,
+        tavsiye,
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(`Analysis save failed: ${response.status}`);
+  }
+}
+
+async function loadConversationMessages(
+  userId: string,
+  conversationId: string,
+): Promise<ChatMessage[]> {
+  const response = await fetch(
+    `${API_BASE_URL}/users/${userId}/conversations/${conversationId}/messages`,
+  );
+
+  if (!response.ok) {
+    throw new Error(`Conversation load failed: ${response.status}`);
+  }
+
+  const data = await response.json();
+
+  if (!Array.isArray(data)) {
+    return [];
+  }
+
+  return data
+    .filter((item) => item && typeof item.text === "string")
+    .map((item) => ({
+      id: String(item.id || `${Date.now()}-${Math.random()}`),
+      sender: item.sender === "user" ? "user" : "bot",
+      spotifyUrl:
+        typeof item.spotifyUrl === "string" ? item.spotifyUrl : undefined,
+      text: item.text,
+      time: typeof item.time === "string" && item.time ? item.time : getTime(),
+    }));
+}
 
 type VoiceApiResponse = {
   emotion?: string;
@@ -94,6 +212,48 @@ type VoiceApiResponse = {
     textEmotion?: string;
     textConfidence?: number | null;
     voiceEmotion?: string;
+    voiceConfidence?: number | null;
+  } | null;
+};
+
+type MediaApiResponse = {
+  mediaKind?: MediaKind;
+  emotion?: string;
+  confidence?: number | null;
+  transcript?: string;
+  assistantReply?: string | null;
+  activity?: string | null;
+  aktivite?: string | null;
+  movie?: string | null;
+  book?: string | null;
+  spotify?: string | null;
+  visualEmotion?: string | null;
+  visualConfidence?: number | null;
+  visualSummary?: string | null;
+  textEmotion?: string | null;
+  textConfidence?: number | null;
+  voiceEmotion?: string | null;
+  voiceConfidence?: number | null;
+  fusionEmotion?: string | null;
+  fusionConfidence?: number | null;
+  processingErrors?: string[] | null;
+  frameStats?: {
+    durationSeconds?: number | null;
+    samplingIntervalSeconds?: number | null;
+    frameCount?: number | null;
+    fps?: number | null;
+  } | null;
+  fusionDecision?: {
+    mode?: string | null;
+    winnerModality?: string | null;
+    winnerEmotion?: string | null;
+    winnerConfidence?: number | null;
+    agreement?: boolean;
+    visualEmotion?: string | null;
+    visualConfidence?: number | null;
+    textEmotion?: string | null;
+    textConfidence?: number | null;
+    voiceEmotion?: string | null;
     voiceConfidence?: number | null;
   } | null;
 };
@@ -229,13 +389,17 @@ function buildVoiceResponseWithFusion(data: VoiceApiResponse) {
   );
 }
 
-function buildVoiceFormData(rawUri: string) {
+function buildVoiceFormData(
+  rawUri: string,
+  userId: string,
+  conversationId: string,
+) {
   const lowerUri = rawUri.toLowerCase();
   const isWavLike = lowerUri.endsWith(".wav") || lowerUri.endsWith(".caf");
   const formData = new FormData();
 
-  formData.append("userId", DEMO_USER_ID);
-  formData.append("conversationId", DEMO_CONVERSATION_ID);
+  formData.append("userId", userId);
+  formData.append("conversationId", conversationId);
   formData.append("notifyN8n", "true");
   formData.append("audio", {
     uri: rawUri,
@@ -301,10 +465,13 @@ function getVoiceFallbackRecommendations(emotion: string) {
   };
 }
 
-function uploadVoiceWithXhr(formData: FormData): Promise<VoiceApiResponse> {
+function uploadVoiceWithXhr(
+  url: string,
+  formData: FormData,
+): Promise<VoiceApiResponse> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", VOICE_API_URL);
+    xhr.open("POST", url);
     xhr.timeout = VOICE_REQUEST_TIMEOUT_MS;
 
     xhr.onload = () => {
@@ -327,8 +494,191 @@ function uploadVoiceWithXhr(formData: FormData): Promise<VoiceApiResponse> {
   });
 }
 
+async function uploadVoice(
+  rawUri: string,
+  userId: string,
+  conversationId: string,
+): Promise<VoiceApiResponse> {
+  let lastError: unknown = null;
+
+  for (const url of VOICE_API_URLS) {
+    try {
+      console.log("VOICE UPLOAD URL:", url);
+      return await uploadVoiceWithXhr(
+        url,
+        buildVoiceFormData(rawUri, userId, conversationId),
+      );
+    } catch (error) {
+      lastError = error;
+      console.log("VOICE UPLOAD FAILED:", url, error);
+    }
+  }
+
+  throw lastError || new Error("Voice upload failed");
+}
+
+function buildMediaFormData(
+  asset: ImagePicker.ImagePickerAsset,
+  mediaKind: MediaKind,
+  userId: string,
+  conversationId: string,
+) {
+  const fallbackType = mediaKind === "video" ? "video/mp4" : "image/jpeg";
+  const fallbackName = mediaKind === "video" ? "media-upload.mp4" : "media-upload.jpg";
+  const uploadName =
+    mediaKind === "image"
+      ? "media-upload.jpg"
+      : asset.fileName || fallbackName;
+  const uploadType =
+    mediaKind === "image"
+      ? "image/jpeg"
+      : asset.mimeType || fallbackType;
+  const formData = new FormData();
+
+  formData.append("userId", userId);
+  formData.append("conversationId", conversationId);
+  formData.append("notifyN8n", "true");
+  formData.append("mediaKind", mediaKind);
+  formData.append("media", {
+    uri: asset.uri,
+    name: uploadName,
+    type: uploadType,
+  } as any);
+
+  return formData;
+}
+
+function uploadMediaWithXhr(formData: FormData): Promise<MediaApiResponse> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", MEDIA_API_URL);
+    xhr.timeout = MEDIA_REQUEST_TIMEOUT_MS;
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText || "{}"));
+        } catch {
+          reject(new Error("Media service returned invalid JSON."));
+        }
+        return;
+      }
+
+      reject(new Error(`Media service failed: ${xhr.status}`));
+    };
+
+    xhr.onerror = () => reject(new Error("Network request failed"));
+    xhr.ontimeout = () => reject(new Error("Network request timed out"));
+    xhr.onabort = () => reject(new Error("Media upload aborted"));
+    xhr.send(formData);
+  });
+}
+
+function getMediaFallbackRecommendations(emotion: string) {
+  const normalizedEmotion = emotion.toLowerCase();
+
+  if (normalizedEmotion === "happy") {
+    return {
+      reply:
+        "Gorselde daha canli ve pozitif bir hava var. Bunu bugun keyifli bir ana cevirebilirsin.",
+      activity: "Kisa bir disari cikma molasi",
+      movie: "Amelie",
+      book: "Kurk Mantolu Madonna",
+      spotify: "Feel Good Indie",
+    };
+  }
+
+  if (normalizedEmotion === "sadness" || normalizedEmotion === "sad") {
+    return {
+      reply:
+        "Gorselde daha dusuk enerjili bir his var. Kendine yumusak bir alan acman iyi gelebilir.",
+      activity: "Sakin bir yuruyus",
+      movie: "Inside Out",
+      book: "Kucuk Prens",
+      spotify: "Acoustic Calm",
+    };
+  }
+
+  if (normalizedEmotion === "anger" || normalizedEmotion === "angry") {
+    return {
+      reply:
+        "Burada biraz yogunluk hissediliyor. Once ritmini dusurup nefesine donmek iyi gelebilir.",
+      activity: "3 dakikalik nefes molasi",
+      movie: "The Secret Life of Walter Mitty",
+      book: "Duygusal Zeka",
+      spotify: "Deep Focus",
+    };
+  }
+
+  return {
+    reply: "Gorseli aldim. Varsa hissettirdiklerini biraz sakinlestirip birlikte okuyabiliriz.",
+    activity: "Kisa bir mola",
+    movie: "Soul",
+    book: "Simyaci",
+    spotify: "Sakin Odak",
+  };
+}
+
+function buildMediaResponseWithFusion(data: MediaApiResponse) {
+  const finalEmotion = String(
+    data.fusionEmotion || data.emotion || "neutral",
+  ).toLowerCase();
+  const finalConfidence = data.fusionConfidence ?? data.confidence ?? null;
+  const visualEmotion =
+    data.visualEmotion || data.fusionDecision?.visualEmotion || "-";
+  const visualConfidence =
+    data.visualConfidence ?? data.fusionDecision?.visualConfidence ?? null;
+  const textEmotion = data.textEmotion || data.fusionDecision?.textEmotion || "-";
+  const textConfidence =
+    data.textConfidence ?? data.fusionDecision?.textConfidence ?? null;
+  const voiceEmotion =
+    data.voiceEmotion || data.fusionDecision?.voiceEmotion || "-";
+  const voiceConfidence =
+    data.voiceConfidence ?? data.fusionDecision?.voiceConfidence ?? null;
+  const winnerModality = data.fusionDecision?.winnerModality || "-";
+  const winnerEmotion =
+    data.fusionDecision?.winnerEmotion || data.fusionEmotion || data.emotion || "-";
+  const winnerConfidence =
+    data.fusionDecision?.winnerConfidence ??
+    data.fusionConfidence ??
+    data.confidence ??
+    null;
+  const transcript = data.transcript?.trim() || "(transcript yok)";
+  const visualSummary = data.visualSummary || "(gorsel ozeti yok)";
+  const mode = data.fusionDecision?.mode || "highest_confidence";
+  const frameSummary =
+    data.mediaKind === "video" && data.frameStats
+      ? `\nVideo suresi: ${data.frameStats.durationSeconds ?? "-"} sn` +
+        `\nFrame araligi: ${data.frameStats.samplingIntervalSeconds ?? "-"} sn`
+      : "";
+  const errorSummary =
+    data.processingErrors && data.processingErrors.length > 0
+      ? `\nIsleme notlari: ${data.processingErrors.join(" | ")}`
+      : "";
+  const formatConfidence = (value?: number | null) =>
+    typeof value === "number" ? `%${Math.round(value * 100)}` : "-";
+
+  return (
+    `Ortak duygu: ${finalEmotion}\n` +
+    `Ortak guven: ${formatConfidence(finalConfidence)}\n\n` +
+    `Gorsel ozeti: ${visualSummary}\n` +
+    `Transcript: ${transcript}\n` +
+    `Karar modu: ${mode}\n` +
+    `Gorsel duygu: ${visualEmotion} (${formatConfidence(visualConfidence)})\n` +
+    `Text duygu: ${textEmotion} (${formatConfidence(textConfidence)})\n` +
+    `Ses duygu: ${voiceEmotion} (${formatConfidence(voiceConfidence)})\n` +
+    `Yuksek guvenli modalite: ${winnerModality} -> ${winnerEmotion} (${formatConfidence(winnerConfidence)})` +
+    `${frameSummary}${errorSummary}`
+  );
+}
+
 export default function CommunityChat() {
+  const { user } = useAuth();
   const listRef = useRef<FlatList<ChatMessage>>(null);
+  const activeUserId = user?.id || DEMO_USER_ID;
+  const activeConversationId = user
+    ? `conversation-${user.id}`
+    : DEMO_CONVERSATION_ID;
 
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
@@ -349,6 +699,45 @@ export default function CommunityChat() {
   const recordingSeconds = Math.floor(
     (recorderState.durationMillis || 0) / 1000,
   );
+
+  useEffect(() => {
+    let ignore = false;
+
+    async function loadMessages() {
+      if (!user) {
+        setMessages(getInitialMessages());
+        return;
+      }
+
+      try {
+        const history = await loadConversationMessages(
+          activeUserId,
+          activeConversationId,
+        );
+
+        if (!ignore) {
+          setMessages(
+            history.length > 0 ? history : getInitialMessages(user.name),
+          );
+        }
+      } catch (error) {
+        console.log("CHAT HISTORY ERROR:", error);
+
+        if (!ignore) {
+          setMessages(getInitialMessages(user.name));
+        }
+      }
+    }
+
+    loadMessages();
+    setInput("");
+    setShowActions(false);
+    setIsTyping(false);
+
+    return () => {
+      ignore = true;
+    };
+  }, [activeConversationId, activeUserId, user, user?.name]);
 
   useEffect(() => {
     if (
@@ -393,9 +782,9 @@ export default function CommunityChat() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          conversationId: DEMO_CONVERSATION_ID,
+          conversationId: activeConversationId,
           message: userMsg,
-          userId: DEMO_USER_ID,
+          userId: activeUserId,
         }),
       });
 
@@ -450,13 +839,135 @@ export default function CommunityChat() {
   };
 
   const pickMedia = async () => {
-    Alert.alert("Seçenekler", "Ne yapmak istersin?", [
-      { text: "Fotoğraf çek", onPress: openCameraPhoto },
-      { text: "Video çek", onPress: openCameraVideo },
-      { text: "Galeriden fotoğraf seç", onPress: pickPhoto },
-      { text: "Galeriden video seç", onPress: pickVideo },
-      { text: "İptal", style: "cancel" },
+    Alert.alert("Secenekler", "Ne yapmak istersin?", [
+      { text: "Fotograf cek", onPress: openCameraPhoto },
+      { text: "Video cek", onPress: openCameraVideo },
+      { text: "Iptal", style: "cancel" },
     ]);
+  };
+
+  const analyzeMediaAsset = async (
+    asset: ImagePicker.ImagePickerAsset,
+    mediaKind: MediaKind,
+  ) => {
+    setShowActions(false);
+
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: `${Date.now()}-${mediaKind}-user`,
+        text: mediaKind === "video" ? "Video gonderildi." : "Gorsel gonderildi.",
+        sender: "user",
+        time: getTime(),
+        mediaUri: asset.uri,
+        mediaType: mediaKind,
+      },
+    ]);
+
+    setIsTyping(true);
+    scrollToEnd();
+
+    try {
+      let data: MediaApiResponse;
+
+      try {
+        data = await uploadMediaWithXhr(
+          buildMediaFormData(
+            asset,
+            mediaKind,
+            activeUserId,
+            activeConversationId,
+          ),
+        );
+      } catch (firstError) {
+        const fallbackUri =
+          Platform.OS === "ios" && asset.uri.startsWith("file://")
+            ? asset.uri.replace("file://", "")
+            : asset.uri;
+
+        if (fallbackUri !== asset.uri) {
+          data = await uploadMediaWithXhr(
+            buildMediaFormData(
+              { ...asset, uri: fallbackUri },
+              mediaKind,
+              activeUserId,
+              activeConversationId,
+            ),
+          );
+        } else {
+          throw firstError;
+        }
+      }
+
+      const emotion = String(
+        data.fusionEmotion || data.emotion || "neutral",
+      ).toLowerCase();
+      const fallback = getMediaFallbackRecommendations(emotion);
+      const assistantReply =
+        typeof data.assistantReply === "string" && data.assistantReply.trim()
+          ? data.assistantReply.trim()
+          : null;
+      const aiText = assistantReply || fallback.reply;
+      const activity = data.aktivite || data.activity || fallback.activity;
+      const movie = data.movie || fallback.movie;
+      const book = data.book || fallback.book;
+      const spotify = data.spotify || fallback.spotify;
+      await saveAnalysisResult({
+        activity,
+        book,
+        confidence: data.fusionConfidence ?? data.confidence ?? null,
+        conversationId: activeConversationId,
+        emotion,
+        message: mediaKind === "video" ? "Video analizi" : "Görsel analizi",
+        movie,
+        spotify,
+        tavsiye: aiText,
+        userId: activeUserId,
+      }).catch((error) => {
+        console.log("MEDIA SAVE ERROR:", error);
+      });
+      const debugSummary = buildMediaResponseWithFusion(data);
+      const mediaText =
+        `Yanit: ${aiText}
+
+` +
+        `Duygu: ${emotion}
+` +
+        `Aktivite: ${activity}
+` +
+        `Film: ${movie}
+` +
+        `Kitap: ${book}
+` +
+        `Spotify: ${spotify}
+
+` +
+        `---
+Kontrol detayi:
+${debugSummary}`;
+      const spotifyUrl =
+        typeof data.spotify === "string" &&
+        data.spotify.includes("open.spotify.com")
+          ? data.spotify
+          : undefined;
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `${Date.now()}-${mediaKind}-bot`,
+          text: mediaText,
+          sender: "bot",
+          time: getTime(),
+          spotifyUrl,
+        },
+      ]);
+    } catch (err) {
+      console.log("MEDIA HATA:", err);
+      Alert.alert("Hata", "Gorsel analizi yapilamadi.");
+    } finally {
+      setIsTyping(false);
+      scrollToEnd();
+    }
   };
 
   const openCameraPhoto = async () => {
@@ -465,11 +976,14 @@ export default function CommunityChat() {
 
     const result = await ImagePicker.launchCameraAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      preferredAssetRepresentationMode:
+        ImagePicker.UIImagePickerPreferredAssetRepresentationMode.Compatible,
       quality: 0.5,
     });
 
-    if (!result.canceled)
-      console.log("Fotoğraf çekildi:", result.assets[0].uri);
+    if (!result.canceled) {
+      await analyzeMediaAsset(result.assets[0], "image");
+    }
   };
 
   const openCameraVideo = async () => {
@@ -482,32 +996,9 @@ export default function CommunityChat() {
       quality: 0.5,
     });
 
-    if (!result.canceled) console.log("Video çekildi:", result.assets[0].uri);
-  };
-
-  const pickPhoto = async () => {
-    const { granted } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!granted) return;
-
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      quality: 0.5,
-    });
-
-    if (!result.canceled)
-      console.log("Fotoğraf seçildi:", result.assets[0].uri);
-  };
-
-  const pickVideo = async () => {
-    const { granted } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!granted) return;
-
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Videos,
-      quality: 0.5,
-    });
-
-    if (!result.canceled) console.log("Video seçildi:", result.assets[0].uri);
+    if (!result.canceled) {
+      await analyzeMediaAsset(result.assets[0], "video");
+    }
   };
 
   const startRecording = async () => {
@@ -578,7 +1069,7 @@ export default function CommunityChat() {
       let data: VoiceApiResponse;
 
       try {
-        data = await uploadVoiceWithXhr(buildVoiceFormData(uri));
+        data = await uploadVoice(uri, activeUserId, activeConversationId);
       } catch (firstError) {
         const fallbackUri =
           Platform.OS === "ios" && uri.startsWith("file://")
@@ -586,11 +1077,28 @@ export default function CommunityChat() {
             : uri;
 
         if (fallbackUri !== uri) {
-          data = await uploadVoiceWithXhr(buildVoiceFormData(fallbackUri));
+          data = await uploadVoice(
+            fallbackUri,
+            activeUserId,
+            activeConversationId,
+          );
         } else {
           throw firstError;
         }
       }
+
+      console.log("VOICE DATA:", {
+        finalEmotion: data.emotion,
+        finalConfidence: data.confidence,
+        textEmotion: data.textEmotion || data.fusionDecision?.textEmotion,
+        textConfidence: data.textConfidence ?? data.fusionDecision?.textConfidence,
+        voiceEmotion: data.voiceEmotion || data.fusionDecision?.voiceEmotion,
+        voiceConfidence:
+          data.voiceConfidence ?? data.fusionDecision?.voiceConfidence,
+        winnerModality: data.fusionDecision?.winnerModality,
+        winnerEmotion: data.fusionDecision?.winnerEmotion,
+        transcript: data.transcript,
+      });
 
       const assistantReply =
         typeof data.assistantReply === "string" && data.assistantReply.trim()
@@ -603,6 +1111,20 @@ export default function CommunityChat() {
       const movie = data.movie || fallback.movie;
       const book = data.book || fallback.book;
       const spotify = data.spotify || fallback.spotify;
+      await saveAnalysisResult({
+        activity,
+        book,
+        confidence: data.fusionConfidence ?? data.confidence ?? null,
+        conversationId: activeConversationId,
+        emotion,
+        message: data.transcript || "Ses analizi",
+        movie,
+        spotify,
+        tavsiye: aiText,
+        userId: activeUserId,
+      }).catch((error) => {
+        console.log("VOICE SAVE ERROR:", error);
+      });
       const debugSummary = buildVoiceResponseWithFusion(data);
       const voiceText =
         `💭 ${aiText}\n\n` +
@@ -709,6 +1231,30 @@ export default function CommunityChat() {
                   isUser ? styles.userBubble : styles.botBubble,
                 ]}
               >
+                {item.mediaType === "image" && item.mediaUri && (
+                  <ExpoImage
+                    source={{ uri: item.mediaUri }}
+                    style={styles.inlineImage}
+                    contentFit="cover"
+                  />
+                )}
+                {item.mediaType === "video" && (
+                  <View style={styles.videoAttachment}>
+                    <MaterialCommunityIcons
+                      name="video-outline"
+                      size={22}
+                      color={isUser ? "#fff" : PURPLE}
+                    />
+                    <Text
+                      style={[
+                        styles.videoAttachmentText,
+                        isUser && styles.userText,
+                      ]}
+                    >
+                      Video secildi
+                    </Text>
+                  </View>
+                )}
                 <Text style={[styles.bubbleText, isUser && styles.userText]}>
                   {item.text}
                 </Text>
@@ -974,6 +1520,29 @@ const styles = StyleSheet.create({
     color: INK,
     fontSize: 14,
     lineHeight: 21,
+  },
+  inlineImage: {
+    width: 220,
+    height: 220,
+    borderRadius: 16,
+    marginBottom: 10,
+    backgroundColor: "#ecebff",
+  },
+  videoAttachment: {
+    minHeight: 54,
+    borderRadius: 16,
+    backgroundColor: "rgba(96, 77, 246, 0.08)",
+    marginBottom: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  videoAttachmentText: {
+    color: INK,
+    fontSize: 13,
+    fontWeight: "700",
   },
   userText: {
     color: "#fff",
