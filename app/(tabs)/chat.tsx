@@ -187,11 +187,28 @@ async function loadConversationMessages(
     }));
 }
 
+async function deleteConversationMessages(
+  userId: string,
+  conversationId: string,
+) {
+  const response = await fetch(
+    `${API_BASE_URL}/users/${userId}/conversations/${conversationId}/messages`,
+    { method: "DELETE" },
+  );
+
+  if (!response.ok) {
+    throw new Error(`Conversation delete failed: ${response.status}`);
+  }
+}
+
 type VoiceApiResponse = {
   emotion?: string;
   confidence?: number | null;
   transcript?: string;
   assistantReply?: string | null;
+  message?: string | null;
+  reply?: string | null;
+  tavsiye?: string | null;
   activity?: string | null;
   aktivite?: string | null;
   movie?: string | null;
@@ -222,6 +239,9 @@ type MediaApiResponse = {
   confidence?: number | null;
   transcript?: string;
   assistantReply?: string | null;
+  message?: string | null;
+  reply?: string | null;
+  tavsiye?: string | null;
   activity?: string | null;
   aktivite?: string | null;
   movie?: string | null;
@@ -263,6 +283,73 @@ function getTime() {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+async function openExternalUrl(url: string) {
+  const targetUrl = normalizeSpotifyOpenUrl(url);
+
+  try {
+    if (Platform.OS === "web") {
+      window.open(targetUrl, "_blank", "noopener,noreferrer");
+      return;
+    }
+
+    const canOpen = await Linking.canOpenURL(targetUrl);
+
+    if (!canOpen) {
+      Alert.alert("Link acilamadi", "Spotify baglantisi bu cihazda acilamiyor.");
+      return;
+    }
+
+    await Linking.openURL(targetUrl);
+  } catch (error) {
+    console.log("Spotify link open error:", error);
+    Alert.alert("Link acilamadi", "Spotify baglantisi acilirken bir sorun olustu.");
+  }
+}
+
+function buildSpotifySearchUrl(query: string) {
+  return `https://open.spotify.com/search/${encodeURIComponent(query)}`;
+}
+
+function getSpotifyQueryForEmotion(emotion?: string | null) {
+  const normalizedEmotion = String(emotion || "neutral").toLowerCase();
+
+  if (normalizedEmotion === "sadness" || normalizedEmotion === "sad") {
+    return "sad acoustic turkish";
+  }
+
+  if (normalizedEmotion === "happy") {
+    return "happy mood playlist";
+  }
+
+  if (normalizedEmotion === "anger" || normalizedEmotion === "angry") {
+    return "calm breathing music";
+  }
+
+  if (normalizedEmotion === "fear" || normalizedEmotion === "fearful") {
+    return "anxiety relief calm music";
+  }
+
+  return "calm mood playlist";
+}
+
+function normalizeSpotifyOpenUrl(url: string) {
+  return url;
+}
+
+function resolveSpotifyUrl(value?: string | null, emotion?: string | null) {
+  const spotifyValue = typeof value === "string" ? value.trim() : "";
+
+  if (!spotifyValue) {
+    return buildSpotifySearchUrl(getSpotifyQueryForEmotion(emotion));
+  }
+
+  if (spotifyValue.includes("open.spotify.com/")) {
+    return spotifyValue;
+  }
+
+  return buildSpotifySearchUrl(spotifyValue);
 }
 
 function formatDuration(totalSeconds: number) {
@@ -326,69 +413,6 @@ function buildVoiceResponse(
   return `Ses kaydını analiz ettim.\n\nDuygu: ${emotion || "neutral"}${confidenceText}\nÖneri: Kendini dinlemek için kısa ve sakin bir mola iyi gelebilir.`;
 }
 
-function buildVoiceResponseWithFusion(data: VoiceApiResponse) {
-  const finalEmotion = String(
-    data.fusionEmotion || data.emotion || "neutral",
-  ).toLowerCase();
-  const finalConfidence = data.fusionConfidence ?? data.confidence ?? null;
-  const transcript = data.transcript?.trim() || "(Turkce net anlasilamadi)";
-
-  const textEmotion = data.textEmotion || data.fusionDecision?.textEmotion || "-";
-  const textConfidence =
-    data.textConfidence ?? data.fusionDecision?.textConfidence ?? null;
-  const voiceEmotion =
-    data.voiceEmotion || data.fusionDecision?.voiceEmotion || "-";
-  const voiceConfidence =
-    data.voiceConfidence ?? data.fusionDecision?.voiceConfidence ?? null;
-  const winnerModality = data.fusionDecision?.winnerModality || "-";
-  const winnerEmotion =
-    data.fusionDecision?.winnerEmotion || data.fusionEmotion || data.emotion || "-";
-  const winnerConfidence =
-    data.fusionDecision?.winnerConfidence ??
-    data.fusionConfidence ??
-    data.confidence ??
-    null;
-  const mode = data.fusionDecision?.mode || "highest_confidence";
-  const agreement = data.fusionDecision?.agreement;
-
-  const formatConfidence = (value?: number | null) =>
-    typeof value === "number" ? `%${Math.round(value * 100)}` : "-";
-
-  let opening = "Ses kaydini analiz ettim.";
-  let recommendation =
-    "Kendini dinlemek icin kisa ve sakin bir mola iyi gelebilir.";
-
-  if (finalEmotion === "sadness" || finalEmotion === "sad") {
-    opening = "Ses tonundan biraz huzun yakaladim.";
-    recommendation =
-      "Kendine yumusak bir mola ver; kisa bir yuruyus iyi gelebilir.";
-  } else if (finalEmotion === "happy") {
-    opening = "Ses tonun daha pozitif geliyor.";
-    recommendation = "Bu enerjiyi bugun kucuk ama guzel bir seye yonlendirebilirsin.";
-  } else if (finalEmotion === "anger" || finalEmotion === "angry") {
-    opening = "Ses tonunda gerginlik algiladim.";
-    recommendation =
-      "Once nefesini yavaslat; sonra neye ihtiyacin oldugunu daha net secebilirsin.";
-  } else if (finalEmotion === "fear" || finalEmotion === "fearful") {
-    opening = "Ses tonunda kaygi izi olabilir.";
-    recommendation =
-      "Dusunceyi kucuk parcalara ayirmak kontrol hissini guclendirebilir.";
-  }
-
-  return (
-    `${opening}\n\n` +
-    `Ortak duygu: ${finalEmotion}\n` +
-    `Ortak guven: ${formatConfidence(finalConfidence)}\n\n` +
-    `Yaziya dokulen: ${transcript}\n` +
-    `Karar modu: ${mode}\n` +
-    `Text duygu: ${textEmotion} (${formatConfidence(textConfidence)})\n` +
-    `Ses duygu: ${voiceEmotion} (${formatConfidence(voiceConfidence)})\n` +
-    `Yuksek guvenli modalite: ${winnerModality} -> ${winnerEmotion} (${formatConfidence(winnerConfidence)})\n` +
-    `Uyum: ${agreement === true ? "evet" : agreement === false ? "hayir" : "-"}\n` +
-    `Oneri: ${recommendation}`
-  );
-}
-
 function buildVoiceFormData(
   rawUri: string,
   userId: string,
@@ -408,61 +432,6 @@ function buildVoiceFormData(
   } as any);
 
   return formData;
-}
-
-function getVoiceFallbackRecommendations(emotion: string) {
-  const normalizedEmotion = emotion.toLowerCase();
-
-  if (normalizedEmotion === "anger" || normalizedEmotion === "angry") {
-    return {
-      reply:
-        "Sesinden biraz gerginlik hissettim. Önce kısa bir nefes molası iyi gelebilir.",
-      activity: "4-7-8 nefes egzersizi",
-      movie: "The Secret Life of Walter Mitty",
-      book: "Duygusal Zeka",
-      spotify: "Calm Vibes",
-    };
-  }
-
-  if (normalizedEmotion === "sadness" || normalizedEmotion === "sad") {
-    return {
-      reply:
-        "Bugün biraz yorgun veya kırgın hissetmiş olabilirsin. Kendine nazik davranman iyi gelir.",
-      activity: "Kısa bir yürüyüş",
-      movie: "Inside Out",
-      book: "Küçük Prens",
-      spotify: "Acoustic Chill",
-    };
-  }
-
-  if (normalizedEmotion === "happy") {
-    return {
-      reply: "Bu iyi enerjiyi küçük ama keyifli bir şeye yönlendirebilirsin.",
-      activity: "Sevdiğin birine mesaj at",
-      movie: "La La Land",
-      book: "Martı Jonathan Livingston",
-      spotify: "Good Vibes",
-    };
-  }
-
-  if (normalizedEmotion === "fear" || normalizedEmotion === "fearful") {
-    return {
-      reply:
-        "Kaygılı hissettiysen önce durup nefesini yavaşlatmak iyi gelebilir.",
-      activity: "Düşünce günlüğü",
-      movie: "A Beautiful Day in the Neighborhood",
-      book: "Kaygı Çağı",
-      spotify: "Peaceful Piano",
-    };
-  }
-
-  return {
-    reply: "Seni duydum. Kendine kısa ve sakin bir alan açman iyi gelebilir.",
-    activity: "Kısa bir mola",
-    movie: "Soul",
-    book: "Simyacı",
-    spotify: "Sakin Odak",
-  };
 }
 
 function uploadVoiceWithXhr(
@@ -574,104 +543,6 @@ function uploadMediaWithXhr(formData: FormData): Promise<MediaApiResponse> {
   });
 }
 
-function getMediaFallbackRecommendations(emotion: string) {
-  const normalizedEmotion = emotion.toLowerCase();
-
-  if (normalizedEmotion === "happy") {
-    return {
-      reply:
-        "Gorselde daha canli ve pozitif bir hava var. Bunu bugun keyifli bir ana cevirebilirsin.",
-      activity: "Kisa bir disari cikma molasi",
-      movie: "Amelie",
-      book: "Kurk Mantolu Madonna",
-      spotify: "Feel Good Indie",
-    };
-  }
-
-  if (normalizedEmotion === "sadness" || normalizedEmotion === "sad") {
-    return {
-      reply:
-        "Gorselde daha dusuk enerjili bir his var. Kendine yumusak bir alan acman iyi gelebilir.",
-      activity: "Sakin bir yuruyus",
-      movie: "Inside Out",
-      book: "Kucuk Prens",
-      spotify: "Acoustic Calm",
-    };
-  }
-
-  if (normalizedEmotion === "anger" || normalizedEmotion === "angry") {
-    return {
-      reply:
-        "Burada biraz yogunluk hissediliyor. Once ritmini dusurup nefesine donmek iyi gelebilir.",
-      activity: "3 dakikalik nefes molasi",
-      movie: "The Secret Life of Walter Mitty",
-      book: "Duygusal Zeka",
-      spotify: "Deep Focus",
-    };
-  }
-
-  return {
-    reply: "Gorseli aldim. Varsa hissettirdiklerini biraz sakinlestirip birlikte okuyabiliriz.",
-    activity: "Kisa bir mola",
-    movie: "Soul",
-    book: "Simyaci",
-    spotify: "Sakin Odak",
-  };
-}
-
-function buildMediaResponseWithFusion(data: MediaApiResponse) {
-  const finalEmotion = String(
-    data.fusionEmotion || data.emotion || "neutral",
-  ).toLowerCase();
-  const finalConfidence = data.fusionConfidence ?? data.confidence ?? null;
-  const visualEmotion =
-    data.visualEmotion || data.fusionDecision?.visualEmotion || "-";
-  const visualConfidence =
-    data.visualConfidence ?? data.fusionDecision?.visualConfidence ?? null;
-  const textEmotion = data.textEmotion || data.fusionDecision?.textEmotion || "-";
-  const textConfidence =
-    data.textConfidence ?? data.fusionDecision?.textConfidence ?? null;
-  const voiceEmotion =
-    data.voiceEmotion || data.fusionDecision?.voiceEmotion || "-";
-  const voiceConfidence =
-    data.voiceConfidence ?? data.fusionDecision?.voiceConfidence ?? null;
-  const winnerModality = data.fusionDecision?.winnerModality || "-";
-  const winnerEmotion =
-    data.fusionDecision?.winnerEmotion || data.fusionEmotion || data.emotion || "-";
-  const winnerConfidence =
-    data.fusionDecision?.winnerConfidence ??
-    data.fusionConfidence ??
-    data.confidence ??
-    null;
-  const transcript = data.transcript?.trim() || "(transcript yok)";
-  const visualSummary = data.visualSummary || "(gorsel ozeti yok)";
-  const mode = data.fusionDecision?.mode || "highest_confidence";
-  const frameSummary =
-    data.mediaKind === "video" && data.frameStats
-      ? `\nVideo suresi: ${data.frameStats.durationSeconds ?? "-"} sn` +
-        `\nFrame araligi: ${data.frameStats.samplingIntervalSeconds ?? "-"} sn`
-      : "";
-  const errorSummary =
-    data.processingErrors && data.processingErrors.length > 0
-      ? `\nIsleme notlari: ${data.processingErrors.join(" | ")}`
-      : "";
-  const formatConfidence = (value?: number | null) =>
-    typeof value === "number" ? `%${Math.round(value * 100)}` : "-";
-
-  return (
-    `Ortak duygu: ${finalEmotion}\n` +
-    `Ortak guven: ${formatConfidence(finalConfidence)}\n\n` +
-    `Gorsel ozeti: ${visualSummary}\n` +
-    `Transcript: ${transcript}\n` +
-    `Karar modu: ${mode}\n` +
-    `Gorsel duygu: ${visualEmotion} (${formatConfidence(visualConfidence)})\n` +
-    `Text duygu: ${textEmotion} (${formatConfidence(textConfidence)})\n` +
-    `Ses duygu: ${voiceEmotion} (${formatConfidence(voiceConfidence)})\n` +
-    `Yuksek guvenli modalite: ${winnerModality} -> ${winnerEmotion} (${formatConfidence(winnerConfidence)})` +
-    `${frameSummary}${errorSummary}`
-  );
-}
-
 export default function CommunityChat() {
   const { user } = useAuth();
   const listRef = useRef<FlatList<ChatMessage>>(null);
@@ -757,6 +628,41 @@ export default function CommunityChat() {
     }, 100);
   };
 
+  const clearMessages = async () => {
+    if (isTyping || recording) return;
+
+    const initialMessages = getInitialMessages(user?.name);
+
+    try {
+      await deleteConversationMessages(activeUserId, activeConversationId);
+      setMessages(initialMessages);
+      setShowActions(false);
+      setInput("");
+    } catch (error) {
+      console.log("CHAT CLEAR ERROR:", error);
+      Alert.alert("Hata", "Sohbet gecmisi silinemedi.");
+    }
+  };
+
+  const confirmClearMessages = () => {
+    if (messages.length <= 1 || isTyping || recording) return;
+
+    Alert.alert(
+      "Sohbeti sil",
+      "Bu sohbetteki mesajlar kalici olarak silinsin mi?",
+      [
+        { text: "Vazgec", style: "cancel" },
+        {
+          text: "Sil",
+          style: "destructive",
+          onPress: () => {
+            void clearMessages();
+          },
+        },
+      ],
+    );
+  };
+
   const sendMessage = async () => {
     if (!input.trim() || isTyping) return;
 
@@ -806,19 +712,13 @@ export default function CommunityChat() {
 
       const botText =
         `💭 ${aiText}\n\n` +
-        `✨ Duygu: ${data.emotion || "neutral"}\n` +
         `🎯 Aktivite: ${data.aktivite || data.activity || "Kısa bir mola ver"}\n` +
         `🎬 Film: ${data.movie || "Soul"}\n` +
         `📚 Kitap: ${data.book || "Simyacı"}\n`;
-      const spotifyUrl =
-        (typeof data.spotify === "string" &&
-        data.spotify.includes("open.spotify.com")
-          ? data.spotify
-          : null) ||
-        (typeof data.sarki === "string" &&
-        data.sarki.includes("open.spotify.com")
-          ? data.sarki
-          : null);
+      const spotifyUrl = resolveSpotifyUrl(
+        typeof data.spotify === "string" ? data.spotify : data.sarki,
+        data.emotion,
+      );
       setMessages((prev) => [
         ...prev,
         {
@@ -902,16 +802,38 @@ export default function CommunityChat() {
       const emotion = String(
         data.fusionEmotion || data.emotion || "neutral",
       ).toLowerCase();
-      const fallback = getMediaFallbackRecommendations(emotion);
+      console.log("MEDIA DATA:", {
+        finalEmotion: data.emotion,
+        finalConfidence: data.confidence,
+        mediaKind: data.mediaKind,
+        visualEmotion: data.visualEmotion || data.fusionDecision?.visualEmotion,
+        visualConfidence:
+          data.visualConfidence ?? data.fusionDecision?.visualConfidence,
+        textEmotion: data.textEmotion || data.fusionDecision?.textEmotion,
+        textConfidence: data.textConfidence ?? data.fusionDecision?.textConfidence,
+        voiceEmotion: data.voiceEmotion || data.fusionDecision?.voiceEmotion,
+        voiceConfidence:
+          data.voiceConfidence ?? data.fusionDecision?.voiceConfidence,
+        winnerModality: data.fusionDecision?.winnerModality,
+        winnerEmotion: data.fusionDecision?.winnerEmotion,
+        transcript: data.transcript,
+        visualSummary: data.visualSummary,
+        assistantReply: data.assistantReply,
+      });
       const assistantReply =
         typeof data.assistantReply === "string" && data.assistantReply.trim()
           ? data.assistantReply.trim()
           : null;
-      const aiText = assistantReply || fallback.reply;
-      const activity = data.aktivite || data.activity || fallback.activity;
-      const movie = data.movie || fallback.movie;
-      const book = data.book || fallback.book;
-      const spotify = data.spotify || fallback.spotify;
+      const aiText =
+        assistantReply ||
+        data.tavsiye ||
+        data.reply ||
+        data.message ||
+        "Seni anlıyorum.";
+      const activity = data.aktivite || data.activity || "Kısa bir mola ver";
+      const movie = data.movie || "Soul";
+      const book = data.book || "Simyacı";
+      const spotify = data.spotify || null;
       await saveAnalysisResult({
         activity,
         book,
@@ -926,30 +848,12 @@ export default function CommunityChat() {
       }).catch((error) => {
         console.log("MEDIA SAVE ERROR:", error);
       });
-      const debugSummary = buildMediaResponseWithFusion(data);
       const mediaText =
-        `Yanit: ${aiText}
-
-` +
-        `Duygu: ${emotion}
-` +
-        `Aktivite: ${activity}
-` +
-        `Film: ${movie}
-` +
-        `Kitap: ${book}
-` +
-        `Spotify: ${spotify}
-
-` +
-        `---
-Kontrol detayi:
-${debugSummary}`;
-      const spotifyUrl =
-        typeof data.spotify === "string" &&
-        data.spotify.includes("open.spotify.com")
-          ? data.spotify
-          : undefined;
+        `💭 ${aiText}\n\n` +
+        `🎯 Aktivite: ${activity}\n` +
+        `🎬 Film: ${movie}\n` +
+        `📚 Kitap: ${book}\n`;
+      const spotifyUrl = resolveSpotifyUrl(data.spotify, emotion);
 
       setMessages((prev) => [
         ...prev,
@@ -1105,12 +1009,16 @@ ${debugSummary}`;
           ? data.assistantReply.trim()
           : null;
       const emotion = String(data.emotion || "neutral").toLowerCase();
-      const fallback = getVoiceFallbackRecommendations(emotion);
-      const aiText = assistantReply || fallback.reply;
-      const activity = data.aktivite || data.activity || fallback.activity;
-      const movie = data.movie || fallback.movie;
-      const book = data.book || fallback.book;
-      const spotify = data.spotify || fallback.spotify;
+      const aiText =
+        assistantReply ||
+        data.tavsiye ||
+        data.reply ||
+        data.message ||
+        "Seni anlıyorum.";
+      const activity = data.aktivite || data.activity || "Kısa bir mola ver";
+      const movie = data.movie || "Soul";
+      const book = data.book || "Simyacı";
+      const spotify = data.spotify || null;
       await saveAnalysisResult({
         activity,
         book,
@@ -1125,20 +1033,12 @@ ${debugSummary}`;
       }).catch((error) => {
         console.log("VOICE SAVE ERROR:", error);
       });
-      const debugSummary = buildVoiceResponseWithFusion(data);
       const voiceText =
         `💭 ${aiText}\n\n` +
-        `✨ Duygu: ${emotion}\n` +
         `🎯 Aktivite: ${activity}\n` +
         `🎬 Film: ${movie}\n` +
-        `📚 Kitap: ${book}\n` +
-        `🎧 Spotify: ${spotify}\n\n` +
-        `---\nKontrol detayı:\n${debugSummary}`;
-      const spotifyUrl =
-        typeof data.spotify === "string" &&
-        data.spotify.includes("open.spotify.com")
-          ? data.spotify
-          : undefined;
+        `📚 Kitap: ${book}\n`;
+      const spotifyUrl = resolveSpotifyUrl(data.spotify, emotion);
 
       setMessages((prev) => [
         ...prev,
@@ -1198,8 +1098,21 @@ ${debugSummary}`;
           </View>
         </View>
 
-        <TouchableOpacity style={styles.iconButton}>
-          <MaterialCommunityIcons name="dots-vertical" size={24} color={INK} />
+        <TouchableOpacity
+          style={[
+            styles.iconButton,
+            (messages.length <= 1 || isTyping || recording) &&
+              styles.iconButtonDisabled,
+          ]}
+          onPress={confirmClearMessages}
+          disabled={messages.length <= 1 || isTyping || recording}
+          accessibilityLabel="Sohbeti sil"
+        >
+          <MaterialCommunityIcons
+            name="trash-can-outline"
+            size={23}
+            color={messages.length <= 1 || isTyping || recording ? MUTED : INK}
+          />
         </TouchableOpacity>
       </View>
 
@@ -1264,7 +1177,7 @@ ${debugSummary}`;
                     activeOpacity={0.8}
                     onPress={() => {
                       if (item.spotifyUrl) {
-                        Linking.openURL(item.spotifyUrl);
+                        void openExternalUrl(item.spotifyUrl);
                       }
                     }}
                   >
@@ -1437,6 +1350,9 @@ const styles = StyleSheet.create({
     backgroundColor: "#f4f5fb",
     alignItems: "center",
     justifyContent: "center",
+  },
+  iconButtonDisabled: {
+    opacity: 0.45,
   },
   headerCenter: {
     flexDirection: "row",

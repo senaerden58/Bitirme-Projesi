@@ -1,5 +1,5 @@
-import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useAuth, type ProfileUser } from "@/contexts/auth";
+import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useFocusEffect } from "@react-navigation/native";
 import Constants from "expo-constants";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -63,7 +63,7 @@ export default function ProfileScreen() {
   const [mode, setMode] = useState<"login" | "register">("login");
   const [summary, setSummary] = useState<EmotionSummary | null>(null);
   const [name, setName] = useState("Sena Erden");
-  const [email, setEmail] = useState("sena@example.com");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isLoadingSummary, setIsLoadingSummary] = useState(false);
@@ -180,7 +180,7 @@ export default function ProfileScreen() {
       setPassword("");
       Alert.alert(
         mode === "login" ? "Giriş yapıldı" : "Hesap oluşturuldu",
-        "Profil Firebase üzerinden hazır.",
+        "Profilin hazır.",
       );
     } catch (error) {
       const message =
@@ -283,7 +283,7 @@ export default function ProfileScreen() {
                 onChangeText={setEmail}
                 autoCapitalize="none"
                 keyboardType="email-address"
-                placeholder="ornek@mail.com"
+                placeholder="ad.soyad@gmail.com"
                 placeholderTextColor="#9aa0b2"
                 style={styles.input}
               />
@@ -326,6 +326,7 @@ export default function ProfileScreen() {
         ) : (
           <>
             <View style={styles.card}>
+              <EmailRow value={user.email} />
               <Row
                 icon="identifier"
                 title="Kullanıcı ID"
@@ -348,7 +349,7 @@ export default function ProfileScreen() {
               <Row
                 icon="database-outline"
                 title="Kayıt alanı"
-                value="Firebase"
+                value="Güvenli hesap"
               />
             </View>
 
@@ -362,7 +363,7 @@ export default function ProfileScreen() {
               <Action
                 icon="shield-check-outline"
                 title="Gizlilik ve veriler"
-                value="Firebase"
+                value="Korunuyor"
               />
               <TouchableOpacity
                 style={styles.logoutButton}
@@ -374,7 +375,6 @@ export default function ProfileScreen() {
             </View>
           </>
         )}
-
       </ScrollView>
     </KeyboardAvoidingView>
   );
@@ -397,6 +397,20 @@ function Row({
       <Text style={styles.rowTitle}>{title}</Text>
       <Text style={styles.rowValue}>{value}</Text>
     </TouchableOpacity>
+  );
+}
+
+function EmailRow({ value }: { value: string }) {
+  return (
+    <View style={styles.emailRow}>
+      <View style={styles.rowIcon}>
+        <MaterialCommunityIcons name="email-outline" size={23} color={PURPLE} />
+      </View>
+      <View style={styles.emailContent}>
+        <Text style={styles.emailLabel}>E-posta</Text>
+        <Text style={styles.emailValue}>{value}</Text>
+      </View>
+    </View>
   );
 }
 
@@ -527,6 +541,34 @@ const styles = StyleSheet.create({
     backgroundColor: "#eeeaff",
     alignItems: "center",
     justifyContent: "center",
+  },
+  emailRow: {
+    minHeight: 72,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    borderRadius: 16,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    backgroundColor: "#f8f7ff",
+    marginBottom: 4,
+  },
+  emailContent: {
+    flex: 1,
+    minWidth: 0,
+  },
+  emailLabel: {
+    color: INK,
+    fontSize: 13,
+    fontWeight: "900",
+    marginBottom: 4,
+  },
+  emailValue: {
+    color: MUTED,
+    fontSize: 13,
+    fontWeight: "700",
+    lineHeight: 18,
+    flexShrink: 1,
   },
   rowTitle: { flex: 1, color: INK, fontSize: 15, fontWeight: "800" },
   rowValue: { color: MUTED, fontSize: 13, fontWeight: "700" },

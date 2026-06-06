@@ -20,6 +20,7 @@ const EMOTION_RETRY_DELAY_MS = Number(
 app.use(cors());
 app.use(express.json());
 
+// Genel yardimcilar: bekleme, guvenli JSON parse ve n8n cevabindan veri ayiklama.
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -122,6 +123,7 @@ function extractPayloadField(payload, fieldName) {
   return null;
 }
 
+// n8n webhook'una istek atar; timeout/retry ve farkli cevap formatlarini burada toplar.
 async function notifyN8n(payload) {
   if (!N8N_WEBHOOK_URL) {
     return null;
@@ -217,6 +219,7 @@ async function notifyN8n(payload) {
   }
 }
 
+// Backend analiz sonucunu n8n workflow'unun bekledigi ortak payload formatina cevirir.
 function buildAutomationPayload({
   analysisMode,
   conversationId,
@@ -247,6 +250,7 @@ function buildAutomationPayload({
   };
 }
 
+// Local auth yardimcilari: e-posta temizleme, sifre hashleme ve public user donusu.
 function normalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
 }
@@ -298,6 +302,7 @@ async function findUserByEmail(email) {
   return snapshot.empty ? null : snapshot.docs[0];
 }
 
+// Basit saglik kontrolu ve Firestore baglanti testi.
 app.get("/", (req, res) => {
   res.json({
     status: "API calisiyor",
@@ -319,6 +324,7 @@ app.get("/test-db", async (req, res) => {
   }
 });
 
+// Kayit ve giris islemleri Firestore'daki users koleksiyonunu kullanir.
 app.post("/auth/register", async (req, res) => {
   const email = normalizeEmail(req.body.email);
   const name = String(req.body.name || "").trim() || "Kullanici";
@@ -413,6 +419,7 @@ console.log(
     : "N8N webhook kapali: N8N_WEBHOOK_URL bos.",
 );
 
+// n8n yanit vermezse kullanilacak duygu bazli varsayilan oneriler.
 function buildRecommendation(emotion, confidence) {
   const normalizedEmotion = String(emotion || "neutral").toLowerCase();
   const response = {
@@ -474,6 +481,69 @@ function buildRecommendation(emotion, confidence) {
   return response;
 }
 
+// Modelin uydurabilecegi Spotify ID'leri yerine guvenli arama linkleri uretir.
+function buildSpotifySearchUrl(query) {
+  return `https://open.spotify.com/search/${encodeURIComponent(query)}`;
+}
+
+function getSpotifyQueryForEmotion(emotion) {
+  const normalizedEmotion = String(emotion || "neutral").toLowerCase();
+
+  if (normalizedEmotion === "sadness" || normalizedEmotion === "sad") {
+    return "sad acoustic turkish";
+  }
+
+  if (normalizedEmotion === "happy") {
+    return "happy mood playlist";
+  }
+
+  if (normalizedEmotion === "anger" || normalizedEmotion === "angry") {
+    return "calm breathing music";
+  }
+
+  if (normalizedEmotion === "fear" || normalizedEmotion === "fearful") {
+    return "anxiety relief calm music";
+  }
+
+  if (normalizedEmotion === "surprise") {
+    return "surprise mood playlist";
+  }
+
+  if (normalizedEmotion === "disgust") {
+    return "calm reset playlist";
+  }
+
+  return "calm mood playlist";
+}
+
+function normalizeSpotifyUrl(value, emotion) {
+  const spotifyValue = String(value || "").trim();
+
+  if (!spotifyValue) {
+    return buildSpotifySearchUrl(getSpotifyQueryForEmotion(emotion));
+  }
+
+  if (spotifyValue.includes("open.spotify.com/search/")) {
+    return spotifyValue;
+  }
+
+  if (
+    spotifyValue.includes("open.spotify.com/playlist/") ||
+    spotifyValue.includes("open.spotify.com/track/") ||
+    spotifyValue.includes("open.spotify.com/album/") ||
+    spotifyValue.includes("open.spotify.com/artist/")
+  ) {
+    return buildSpotifySearchUrl(getSpotifyQueryForEmotion(emotion));
+  }
+
+  if (spotifyValue.includes("open.spotify.com/")) {
+    return spotifyValue;
+  }
+
+  return buildSpotifySearchUrl(spotifyValue);
+}
+
+// FastAPI emotion-service ile text duygu analizi yapar.
 async function predictEmotionOnce(message) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), EMOTION_TIMEOUT_MS);
@@ -516,6 +586,7 @@ async function predictEmotion(message) {
   throw lastError || new Error("Emotion service is unavailable");
 }
 
+// Kullanici mesaji, bot cevabi ve oneriyi tek Firestore transaction'i icinde kaydeder.
 async function saveChatLog({
   conversationId,
   emotionData,
@@ -591,6 +662,7 @@ async function saveChatLog({
   };
 }
 
+// Ana text sohbet endpoint'i: duygu analizi, n8n onerisi, Spotify duzeltme ve kayit.
 app.post("/recommendation", async (req, res) => {
   const {
     conversationId = "demo-conversation",
@@ -662,9 +734,12 @@ app.post("/recommendation", async (req, res) => {
     const activity = extractPayloadField(automation, "activity");
     const movie = extractPayloadField(automation, "movie");
     const book = extractPayloadField(automation, "book");
-    const spotify = extractPayloadField(automation, "spotify");
     const emotion = extractPayloadField(automation, "emotion");
     const confidence = extractPayloadField(automation, "confidence");
+    const spotify = normalizeSpotifyUrl(
+      extractPayloadField(automation, "spotify") || recommendation.spotify,
+      emotion || recommendation.emotion,
+    );
     const assistantReply =
       automation?.assistantReply ||
       extractPayloadField(automation, "message") ||
@@ -678,7 +753,7 @@ app.post("/recommendation", async (req, res) => {
       ...(activity ? { aktivite: activity, activity } : {}),
       ...(movie ? { movie } : {}),
       ...(book ? { book } : {}),
-      ...(spotify ? { spotify } : {}),
+      spotify,
     };
 
     const saved = await saveChatLog({
@@ -704,6 +779,7 @@ app.post("/recommendation", async (req, res) => {
   }
 });
 
+// Profil gecmisi icin son onerileri getirir.
 app.get("/users/:userId/recommendations", async (req, res) => {
   try {
     const snapshot = await db
@@ -721,6 +797,7 @@ app.get("/users/:userId/recommendations", async (req, res) => {
   }
 });
 
+// Ses/gorsel analizinden gelen sonucu sohbet gecmisine manuel olarak ekler.
 app.post("/users/:userId/recommendations", async (req, res) => {
   const {
     activity = null,
@@ -734,6 +811,7 @@ app.post("/users/:userId/recommendations", async (req, res) => {
     spotify = null,
     tavsiye = null,
   } = req.body;
+  const safeSpotify = normalizeSpotifyUrl(spotify, emotion);
 
   try {
     const now = admin.firestore.FieldValue.serverTimestamp();
@@ -779,7 +857,7 @@ app.post("/users/:userId/recommendations", async (req, res) => {
         sender: "bot",
         emotion,
         recommendationId: recommendationRef.id,
-        spotify,
+        spotify: safeSpotify,
         createdAt: now,
       });
 
@@ -794,7 +872,7 @@ app.post("/users/:userId/recommendations", async (req, res) => {
         aktivite,
         movie,
         book,
-        spotify,
+        spotify: safeSpotify,
         createdAt: now,
       });
     });
@@ -811,6 +889,7 @@ app.post("/users/:userId/recommendations", async (req, res) => {
   }
 });
 
+// Sohbet gecmisini messages ve recommendations kayitlarini birlestirerek geri kurar.
 app.get("/users/:userId/conversations/:conversationId/messages", async (req, res) => {
   try {
     function getCreatedAtMs(data) {
@@ -839,7 +918,7 @@ app.get("/users/:userId/conversations/:conversationId/messages", async (req, res
       ];
 
       if (data.spotify) {
-        lines.push(`Spotify: ${data.spotify}`);
+        lines.push(`Spotify: ${normalizeSpotifyUrl(data.spotify, data.emotion)}`);
       }
 
       return lines.join("\n");
@@ -866,7 +945,9 @@ app.get("/users/:userId/conversations/:conversationId/messages", async (req, res
           id: doc.id,
           recommendationId: data.recommendationId || null,
           sender: data.sender || "bot",
-          spotifyUrl: data.spotify || null,
+          spotifyUrl: data.spotify
+            ? normalizeSpotifyUrl(data.spotify, data.emotion)
+            : null,
           text: data.text || "",
           time: formatMessageTime(data),
         };
@@ -901,7 +982,9 @@ app.get("/users/:userId/conversations/:conversationId/messages", async (req, res
 
       if (recommendation) {
         message.text = buildBotText(recommendation);
-        message.spotifyUrl = recommendation.spotify || message.spotifyUrl;
+        message.spotifyUrl = recommendation.spotify
+          ? normalizeSpotifyUrl(recommendation.spotify, recommendation.emotion)
+          : message.spotifyUrl;
       }
     }
 
@@ -941,7 +1024,7 @@ app.get("/users/:userId/conversations/:conversationId/messages", async (req, res
         id: data.botMessageId || `${id}-bot`,
         recommendationId: id,
         sender: "bot",
-        spotifyUrl: data.spotify || null,
+        spotifyUrl: data.spotify ? normalizeSpotifyUrl(data.spotify, data.emotion) : null,
         text: buildBotText(data),
         time: formatMessageTime(data),
       });
@@ -968,6 +1051,56 @@ app.get("/users/:userId/conversations/:conversationId/messages", async (req, res
   }
 });
 
+// Chat ekranindaki cop kutusu: ilgili konusmanin mesaj ve onerilerini siler.
+app.delete("/users/:userId/conversations/:conversationId/messages", async (req, res) => {
+  try {
+    const userRef = db.collection("users").doc(req.params.userId);
+    const conversationRef = userRef
+      .collection("conversations")
+      .doc(req.params.conversationId);
+    const messagesSnapshot = await conversationRef
+      .collection("messages")
+      .limit(450)
+      .get();
+    const recommendationsSnapshot = await userRef
+      .collection("recommendations")
+      .where("conversationId", "==", req.params.conversationId)
+      .limit(450)
+      .get();
+    const batch = db.batch();
+
+    messagesSnapshot.docs.forEach((doc) => {
+      batch.delete(doc.ref);
+    });
+
+    recommendationsSnapshot.docs.forEach((doc) => {
+      batch.delete(doc.ref);
+    });
+
+    batch.set(
+      conversationRef,
+      {
+        lastEmotion: null,
+        lastMessage: "",
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+
+    await batch.commit();
+
+    res.json({
+      deletedMessages: messagesSnapshot.size,
+      deletedRecommendations: recommendationsSnapshot.size,
+      cleared: true,
+    });
+  } catch (err) {
+    console.log("ERROR:", err);
+    res.status(500).json({ error: "Conversation clear error" });
+  }
+});
+
+// Profil kartlari icin duygu dagilimi ve toplam analiz sayisini hesaplar.
 app.get("/users/:userId/emotion-summary", async (req, res) => {
   try {
     const snapshot = await db
@@ -999,6 +1132,7 @@ app.get("/users/:userId/emotion-summary", async (req, res) => {
   }
 });
 
+// Profildeki gunluk ve hedef islemleri icin basit Firestore yazma endpointleri.
 app.post("/users/:userId/journal", async (req, res) => {
   const { mood = null, text, type = "journal" } = req.body;
 

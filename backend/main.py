@@ -41,6 +41,7 @@ app = FastAPI()
 TRUE_VALUES = {"1", "true", "yes", "on"}
 
 
+# Ortam degiskenlerini guvenli okuyup servis davranisini kolayca ayarlamak icin kullanilir.
 def env_flag(name, default="0"):
     return os.getenv(name, default).strip().lower() in TRUE_VALUES
 
@@ -93,6 +94,7 @@ WHISPER_INITIAL_PROMPT = (
     or None
 )
 
+# Text modelinin neutral'a dusmesi gereken rutin cumleleri ayirtmak icin sozlukler.
 EMOTION_WORDS = {
     "mutlu", "mutluyum", "sevindim", "sevincli", "neseli", "harika", "guzel",
     "uzgun", "uzuldum", "mutsuz", "kotu", "agladim", "yalniz",
@@ -160,6 +162,7 @@ SMILE_CASCADE = cv2.CascadeClassifier(
     cv2.data.haarcascades + "haarcascade_smile.xml"
 )
 
+# Text duygu modeli uygulama acilirken yuklenir; ses ve Whisper ise lazy-load edilir.
 device = torch.device(DEFAULT_DEVICE_NAME)
 model_path = os.path.join(os.getcwd(), "emotion-service", "emotionModels", "emotionText")
 tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
@@ -172,6 +175,7 @@ class TextRequest(BaseModel):
     text: str
 
 
+# Ses modeli ilk ihtiyacta import edilir; boylece servis daha kontrollu acilir.
 def get_voice_predictor():
     global voice_predictor
 
@@ -216,6 +220,7 @@ def get_whisper_model():
     return whisper_model
 
 
+# Startup'ta ses pipeline'ini isitip ilk kullanici istegindeki beklemeyi azaltir.
 def warmup_voice_stack():
     try:
         get_voice_predictor()
@@ -238,6 +243,7 @@ def has_disallowed_script_for_turkish(text):
     )
 
 
+# Ses dosyasini Whisper ile Turkce metne cevirir ve kalite/dil korumasi uygular.
 def transcribe_audio(file_path):
     model = get_whisper_model()
     common_kwargs = {
@@ -388,6 +394,7 @@ def is_routine_text(text):
     )
 
 
+# Text-only analiz: transformer modeli duygu, guven ve olasilik dagilimi dondurur.
 def predict_text_analysis(text):
     inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True)
     inputs = {key: value.to(device) for key, value in inputs.items()}
@@ -439,6 +446,7 @@ def normalize_score_map(score_map):
     }
 
 
+# Gorsel/video pipeline yardimcilari: boyut kucultme, preview ve dosya turu ayirma.
 def resize_visual_frame(frame):
     height, width = frame.shape[:2]
     longest_side = max(height, width)
@@ -531,6 +539,7 @@ def build_visual_summary(features):
     )
 
 
+# Tek bir frame uzerinden parlaklik, renk, kenar, yuz ve gulumseme sinyalleriyle duygu tahmini.
 def analyze_visual_frame(frame):
     resized = resize_visual_frame(frame)
     rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
@@ -636,6 +645,7 @@ def choose_video_sampling_interval(duration_seconds):
     return LONG_VIDEO_FRAME_INTERVAL_SECONDS
 
 
+# Videodan bastan/sondan kirpilmis esit aralikli frame secimi yapar.
 def choose_even_video_frame_indices(frame_count, fps, duration_seconds):
     if frame_count <= 0:
         return []
@@ -755,6 +765,7 @@ def sample_video_frames(file_path):
         capture.release()
 
 
+# Video analizinde frame sonuclari toplanip tek bir gorsel duygu sonucuna indirgenir.
 def analyze_video_file(file_path):
     frame_data = sample_video_frames(file_path)
     frame_analyses = []
@@ -821,6 +832,7 @@ def normalize_probabilities(probabilities):
     }
 
 
+# Text, ses ve gorsel modalitelerini guven skoruna gore tek final duyguya birlestirir.
 def fuse_modalities(results_by_name):
     available = []
 
@@ -956,6 +968,7 @@ def fuse_emotions(text_result, voice_result):
     )
 
 
+# n8n cevaplari farkli sekillerde gelebilecegi icin JSON ve alan ayiklama burada toplanir.
 def parse_json_safely(raw_text):
     if not raw_text:
         return None
@@ -1032,6 +1045,111 @@ def extract_payload_field(payload, field_name):
     return None
 
 
+def get_default_recommendation(emotion):
+    normalized = str(emotion or "neutral").lower()
+    recommendation = {
+        "reply": "Analiz sonucuna gore kendini dinlemek icin kisa ve sakin bir mola iyi gelebilir.",
+        "activity": "5 dakikalik nefes egzersizi",
+        "movie": "Soul",
+        "book": "Simyaci",
+        "spotify": "calm mood playlist",
+    }
+
+    if normalized in {"sadness", "sad"}:
+        return {
+            **recommendation,
+            "reply": "Analizde huzun izleri gorunuyor. Kendine nazik davranip kisa bir yuruyus ya da sakin bir muzik molasi verebilirsin.",
+            "activity": "Kisa bir yuruyus",
+            "movie": "Inside Out",
+            "book": "Kucuk Prens",
+            "spotify": "sad acoustic turkish",
+        }
+
+    if normalized == "happy":
+        return {
+            **recommendation,
+            "reply": "Analizde pozitif bir duygu one cikiyor. Bu enerjiyi sevdigin bir aktiviteye ya da kucuk bir hedefe yonlendirebilirsin.",
+            "activity": "Arkadaslarla kisa bir bulusma",
+            "movie": "La La Land",
+            "book": "Marti Jonathan Livingston",
+            "spotify": "happy mood playlist",
+        }
+
+    if normalized in {"anger", "angry"}:
+        return {
+            **recommendation,
+            "reply": "Analizde gerginlik/ofke sinyali var. Once nefesini yavaslatip sonra neye ihtiyacin oldugunu not etmek iyi gelebilir.",
+            "activity": "4-7-8 nefes egzersizi",
+            "movie": "The Secret Life of Walter Mitty",
+            "book": "Duygusal Zeka",
+            "spotify": "calm breathing music",
+        }
+
+    if normalized in {"fear", "fearful"}:
+        return {
+            **recommendation,
+            "reply": "Analizde kaygi/korku sinyali var. Duyguyu kucuk parcalara ayirip kontrol edebilecegin ilk adimi secmeyi deneyebilirsin.",
+            "activity": "Dusunce gunlugu",
+            "movie": "A Beautiful Day in the Neighborhood",
+            "book": "Kaygi Cagi",
+            "spotify": "anxiety relief calm music",
+        }
+
+    if normalized == "surprise":
+        return {
+            **recommendation,
+            "reply": "Analizde sasirma duygusu one cikiyor. Biraz durup neyin seni etkiledigini yazmak iyi bir baslangic olabilir.",
+            "activity": "Kisa not alma",
+            "movie": "The Secret Life of Walter Mitty",
+            "book": "Simyaci",
+            "spotify": "surprise mood playlist",
+        }
+
+    if normalized == "disgust":
+        return {
+            **recommendation,
+            "reply": "Analizde rahatsizlik/tiksinme sinyali var. Ortamdan kisa sure uzaklasip sakinlesmeye alan acabilirsin.",
+            "activity": "Sakin reset molasi",
+            "movie": "Soul",
+            "book": "Duygusal Zeka",
+            "spotify": "calm reset playlist",
+        }
+
+    return recommendation
+
+
+def build_voice_text_reply(emotion, transcript_text):
+    recommendation = get_default_recommendation(emotion)
+    transcript_note = (
+        f" Ses kaydindan anlasilan metin: \"{transcript_text}\""
+        if transcript_text
+        else " Ses kaydindan net bir metin cikarilamadi."
+    )
+
+    return f"{recommendation['reply']}{transcript_note}"
+
+
+def build_media_text_reply(emotion, media_kind, visual_summary, transcript_text):
+    recommendation = get_default_recommendation(emotion)
+    media_label = "video" if media_kind == "video" else "gorsel"
+    summary_note = f" {media_label.capitalize()} ozeti: {visual_summary}" if visual_summary else ""
+    transcript_note = (
+        f" Videodan anlasilan metin: \"{transcript_text}\""
+        if transcript_text
+        else ""
+    )
+
+    return f"{recommendation['reply']}{summary_note}{transcript_note}"
+
+
+def log_emotion_result(label, payload):
+    print(
+        f"{label}: "
+        + json.dumps(payload, ensure_ascii=False, default=str),
+        flush=True,
+    )
+
+
 def post_n8n_payload(payload):
     if not N8N_WEBHOOK_URL:
         return None
@@ -1102,6 +1220,7 @@ async def notify_n8n(payload):
     return await asyncio.to_thread(post_n8n_payload, payload)
 
 
+# Text analizi icin n8n'e giden ortak otomasyon payload'u.
 def build_automation_payload(
     analysis_mode,
     conversation_id,
@@ -1129,6 +1248,7 @@ def build_automation_payload(
     }
 
 
+# Ses + transcript analizini n8n'e okunabilir bir ozet ve detayli modalite verisiyle yollar.
 def build_voice_automation_payload(
     conversation_id,
     transcription,
@@ -1254,6 +1374,7 @@ def build_voice_automation_payload(
     }
 
 
+# Gorsel/video analizini n8n'e; preview, transcript ve fusion karariyla birlikte yollar.
 def build_media_automation_payload(
     conversation_id,
     media_kind,
@@ -1390,11 +1511,13 @@ def predict(req: TextRequest):
     return predict_text_analysis(req.text)
 
 
+# Servis baslarken agir ses modellerini arka planda hazirlar.
 @app.on_event("startup")
 async def startup_warmup():
     await asyncio.to_thread(warmup_voice_stack)
 
 
+# Ses dosyasi alir; voice, speech-to-text ve text sonucunu fusion ile birlestirir.
 @app.post("/predict-voice")
 async def predict_voice(
     audio: UploadFile = File(...),
@@ -1426,15 +1549,36 @@ async def predict_voice(
             user_id=userId,
         )
         automation = await notify_n8n(automation_payload) if notifyN8n else None
-        assistant_reply = (
+        final_emotion = fusion_result.get("emotion")
+        default_recommendation = get_default_recommendation(final_emotion)
+        n8n_assistant_reply = (
             automation.get("assistantReply")
             if isinstance(automation, dict)
             else None
         )
-        activity = extract_payload_field(automation, "activity")
-        movie = extract_payload_field(automation, "movie")
-        book = extract_payload_field(automation, "book")
-        spotify = extract_payload_field(automation, "spotify")
+        assistant_reply = n8n_assistant_reply or build_voice_text_reply(
+            final_emotion,
+            transcript_text,
+        )
+        activity = extract_payload_field(automation, "activity") or default_recommendation["activity"]
+        movie = extract_payload_field(automation, "movie") or default_recommendation["movie"]
+        book = extract_payload_field(automation, "book") or default_recommendation["book"]
+        spotify = extract_payload_field(automation, "spotify") or default_recommendation["spotify"]
+
+        log_emotion_result(
+            "VOICE EMOTION RESULT",
+            {
+                "filename": audio.filename,
+                "transcript": transcript_text,
+                "textEmotion": text_result.get("emotion") if text_result else None,
+                "textConfidence": text_result.get("confidence") if text_result else None,
+                "voiceEmotion": voice_result.get("emotion") if voice_result else None,
+                "voiceConfidence": voice_result.get("confidence") if voice_result else None,
+                "fusionEmotion": fusion_result.get("emotion"),
+                "fusionConfidence": fusion_result.get("confidence"),
+                "assistantReply": assistant_reply,
+            },
+        )
 
         return {
             "filename": audio.filename,
@@ -1446,12 +1590,21 @@ async def predict_voice(
             "fusionDecision": automation_payload.get("fusionDecision"),
             "emotion": fusion_result.get("emotion"),
             "confidence": fusion_result.get("confidence"),
+            "textEmotion": text_result.get("emotion") if text_result else None,
+            "textConfidence": text_result.get("confidence") if text_result else None,
+            "voiceEmotion": voice_result.get("emotion") if voice_result else None,
+            "voiceConfidence": voice_result.get("confidence") if voice_result else None,
+            "fusionEmotion": fusion_result.get("emotion"),
+            "fusionConfidence": fusion_result.get("confidence"),
             "assistantReply": assistant_reply,
+            "reply": assistant_reply,
+            "tavsiye": assistant_reply,
             "activity": activity,
             "aktivite": activity,
             "movie": movie,
             "book": book,
             "spotify": spotify,
+            "n8nMissingAssistantReply": not bool(n8n_assistant_reply),
             "automation": automation,
             "automationPayload": automation_payload,
         }
@@ -1460,6 +1613,7 @@ async def predict_voice(
             os.remove(temp_audio_path)
 
 
+# Fotograf/video alir; gorsel analizi, video transcript'i ve varsa ses analizini birlestirir.
 @app.post("/predict-media")
 async def predict_media(
     media: UploadFile = File(...),
@@ -1545,20 +1699,49 @@ async def predict_media(
             user_id=userId,
         )
         automation = await notify_n8n(automation_payload) if notifyN8n else None
-        assistant_reply = (
+        final_emotion = fusion_result.get("emotion")
+        default_recommendation = get_default_recommendation(final_emotion)
+        n8n_assistant_reply = (
             automation.get("assistantReply")
             if isinstance(automation, dict)
             else None
         )
-        activity = extract_payload_field(automation, "activity")
-        movie = extract_payload_field(automation, "movie")
-        book = extract_payload_field(automation, "book")
-        spotify = extract_payload_field(automation, "spotify")
+        transcript_text = transcription.get("text", "").strip()
+        visual_summary = visual_result.get("summary") if visual_result else None
+        assistant_reply = n8n_assistant_reply or build_media_text_reply(
+            final_emotion,
+            resolved_kind,
+            visual_summary,
+            transcript_text,
+        )
+        activity = extract_payload_field(automation, "activity") or default_recommendation["activity"]
+        movie = extract_payload_field(automation, "movie") or default_recommendation["movie"]
+        book = extract_payload_field(automation, "book") or default_recommendation["book"]
+        spotify = extract_payload_field(automation, "spotify") or default_recommendation["spotify"]
+
+        log_emotion_result(
+            "MEDIA EMOTION RESULT",
+            {
+                "filename": media.filename,
+                "mediaKind": resolved_kind,
+                "transcript": transcript_text,
+                "visualEmotion": visual_result.get("emotion") if visual_result else None,
+                "visualConfidence": visual_result.get("confidence") if visual_result else None,
+                "textEmotion": text_result.get("emotion") if text_result else None,
+                "textConfidence": text_result.get("confidence") if text_result else None,
+                "voiceEmotion": voice_result.get("emotion") if voice_result else None,
+                "voiceConfidence": voice_result.get("confidence") if voice_result else None,
+                "fusionEmotion": fusion_result.get("emotion"),
+                "fusionConfidence": fusion_result.get("confidence"),
+                "assistantReply": assistant_reply,
+                "processingErrors": processing_errors,
+            },
+        )
 
         return {
             "filename": media.filename,
             "mediaKind": resolved_kind,
-            "transcript": transcription.get("text", "").strip(),
+            "transcript": transcript_text,
             "transcription": transcription,
             "visual": visual_result,
             "text": text_result,
@@ -1580,11 +1763,14 @@ async def predict_media(
             "fusionConfidence": fusion_result.get("confidence"),
             "frameStats": visual_result.get("frameStats") if visual_result else None,
             "assistantReply": assistant_reply,
+            "reply": assistant_reply,
+            "tavsiye": assistant_reply,
             "activity": activity,
             "aktivite": activity,
             "movie": movie,
             "book": book,
             "spotify": spotify,
+            "n8nMissingAssistantReply": not bool(n8n_assistant_reply),
             "processingErrors": processing_errors,
             "automation": automation,
             "automationPayload": automation_payload,
