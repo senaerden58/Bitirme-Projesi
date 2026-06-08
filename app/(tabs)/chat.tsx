@@ -1,5 +1,5 @@
-import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useAuth } from "@/contexts/auth";
+import { MaterialCommunityIcons } from "@expo/vector-icons";
 import {
   AudioQuality,
   IOSOutputFormat,
@@ -98,12 +98,13 @@ type ChatMessage = {
 type MediaKind = "image" | "video";
 
 function getInitialMessages(name?: string): ChatMessage[] {
-  const displayName = name?.trim() || "Sena";
+  const displayName = name?.trim().split(/\s+/)[0];
+  const greeting = displayName ? `Merhaba ${displayName}` : "Merhaba";
 
   return [
     {
       id: "1",
-      text: `Merhaba ${displayName} 💜 Bugün nasıl hissediyorsun? Aklından geçenleri yaz, ben duygu durumuna göre sana küçük öneriler hazırlayayım.`,
+      text: `${greeting} 💜 Bugün nasıl hissediyorsun? Aklından geçenleri yaz, ben duygu durumuna göre sana küçük öneriler hazırlayayım.`,
       sender: "bot",
       time: getTime(),
     },
@@ -297,14 +298,20 @@ async function openExternalUrl(url: string) {
     const canOpen = await Linking.canOpenURL(targetUrl);
 
     if (!canOpen) {
-      Alert.alert("Link acilamadi", "Spotify baglantisi bu cihazda acilamiyor.");
+      Alert.alert(
+        "Link acilamadi",
+        "Spotify baglantisi bu cihazda acilamiyor.",
+      );
       return;
     }
 
     await Linking.openURL(targetUrl);
   } catch (error) {
     console.log("Spotify link open error:", error);
-    Alert.alert("Link acilamadi", "Spotify baglantisi acilirken bir sorun olustu.");
+    Alert.alert(
+      "Link acilamadi",
+      "Spotify baglantisi acilirken bir sorun olustu.",
+    );
   }
 }
 
@@ -350,6 +357,16 @@ function resolveSpotifyUrl(value?: string | null, emotion?: string | null) {
   }
 
   return buildSpotifySearchUrl(spotifyValue);
+}
+
+function removeVoiceEmotionDetails(text: string) {
+  return text
+    .replace(
+      /^\s*(?:text\s+duygu|ses\s+duygu|duygu|emotion|guven|güven|secilen|seçilen|uyum)\s*:.*(?:\r?\n)?/gim,
+      "",
+    )
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function formatDuration(totalSeconds: number) {
@@ -493,15 +510,12 @@ function buildMediaFormData(
   conversationId: string,
 ) {
   const fallbackType = mediaKind === "video" ? "video/mp4" : "image/jpeg";
-  const fallbackName = mediaKind === "video" ? "media-upload.mp4" : "media-upload.jpg";
+  const fallbackName =
+    mediaKind === "video" ? "media-upload.mp4" : "media-upload.jpg";
   const uploadName =
-    mediaKind === "image"
-      ? "media-upload.jpg"
-      : asset.fileName || fallbackName;
+    mediaKind === "image" ? "media-upload.jpg" : asset.fileName || fallbackName;
   const uploadType =
-    mediaKind === "image"
-      ? "image/jpeg"
-      : asset.mimeType || fallbackType;
+    mediaKind === "image" ? "image/jpeg" : asset.mimeType || fallbackType;
   const formData = new FormData();
 
   formData.append("userId", userId);
@@ -554,7 +568,7 @@ export default function CommunityChat() {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: "1",
-      text: "Merhaba Sena 💜 Bugün nasıl hissediyorsun? Aklından geçenleri yaz, ben duygu durumuna göre sana küçük öneriler hazırlayayım.",
+      text: "Merhaba💜 Bugün nasıl hissediyorsun? Aklından geçenleri yaz, ben duygu durumuna göre sana küçük öneriler hazırlayayım.",
       sender: "bot",
       time: getTime(),
     },
@@ -649,7 +663,7 @@ export default function CommunityChat() {
 
     Alert.alert(
       "Sohbeti sil",
-      "Bu sohbetteki mesajlar kalici olarak silinsin mi?",
+      "Bu sohbetteki mesajlar kalıcı olarak silinsin mi?",
       [
         { text: "Vazgec", style: "cancel" },
         {
@@ -709,7 +723,6 @@ export default function CommunityChat() {
         data.tavsiye ||
         data.message ||
         "Seni anlıyorum.";
-
       const botText =
         `💭 ${aiText}\n\n` +
         `🎯 Aktivite: ${data.aktivite || data.activity || "Kısa bir mola ver"}\n` +
@@ -740,9 +753,9 @@ export default function CommunityChat() {
 
   const pickMedia = async () => {
     Alert.alert("Secenekler", "Ne yapmak istersin?", [
-      { text: "Fotograf cek", onPress: openCameraPhoto },
-      { text: "Video cek", onPress: openCameraVideo },
-      { text: "Iptal", style: "cancel" },
+      // { text: "Fotograf cek", onPress: openCameraPhoto },
+      { text: "Video çek", onPress: openCameraVideo },
+      { text: "İptal", style: "cancel" },
     ]);
   };
 
@@ -756,7 +769,8 @@ export default function CommunityChat() {
       ...prev,
       {
         id: `${Date.now()}-${mediaKind}-user`,
-        text: mediaKind === "video" ? "Video gonderildi." : "Gorsel gonderildi.",
+        text:
+          mediaKind === "video" ? "Video gönderildi." : "Görsel gönderildi.",
         sender: "user",
         time: getTime(),
         mediaUri: asset.uri,
@@ -810,7 +824,8 @@ export default function CommunityChat() {
         visualConfidence:
           data.visualConfidence ?? data.fusionDecision?.visualConfidence,
         textEmotion: data.textEmotion || data.fusionDecision?.textEmotion,
-        textConfidence: data.textConfidence ?? data.fusionDecision?.textConfidence,
+        textConfidence:
+          data.textConfidence ?? data.fusionDecision?.textConfidence,
         voiceEmotion: data.voiceEmotion || data.fusionDecision?.voiceEmotion,
         voiceConfidence:
           data.voiceConfidence ?? data.fusionDecision?.voiceConfidence,
@@ -867,7 +882,7 @@ export default function CommunityChat() {
       ]);
     } catch (err) {
       console.log("MEDIA HATA:", err);
-      Alert.alert("Hata", "Gorsel analizi yapilamadi.");
+      Alert.alert("Hata", "Görsel analizi yapılamadı.");
     } finally {
       setIsTyping(false);
       scrollToEnd();
@@ -995,7 +1010,8 @@ export default function CommunityChat() {
         finalEmotion: data.emotion,
         finalConfidence: data.confidence,
         textEmotion: data.textEmotion || data.fusionDecision?.textEmotion,
-        textConfidence: data.textConfidence ?? data.fusionDecision?.textConfidence,
+        textConfidence:
+          data.textConfidence ?? data.fusionDecision?.textConfidence,
         voiceEmotion: data.voiceEmotion || data.fusionDecision?.voiceEmotion,
         voiceConfidence:
           data.voiceConfidence ?? data.fusionDecision?.voiceConfidence,
@@ -1009,12 +1025,13 @@ export default function CommunityChat() {
           ? data.assistantReply.trim()
           : null;
       const emotion = String(data.emotion || "neutral").toLowerCase();
-      const aiText =
+      const rawAiText =
         assistantReply ||
         data.tavsiye ||
         data.reply ||
         data.message ||
         "Seni anlıyorum.";
+      const aiText = removeVoiceEmotionDetails(rawAiText) || "Seni anlıyorum.";
       const activity = data.aktivite || data.activity || "Kısa bir mola ver";
       const movie = data.movie || "Soul";
       const book = data.book || "Simyacı";
@@ -1164,7 +1181,7 @@ export default function CommunityChat() {
                         isUser && styles.userText,
                       ]}
                     >
-                      Video secildi
+                      Video seçildi
                     </Text>
                   </View>
                 )}
@@ -1256,7 +1273,7 @@ export default function CommunityChat() {
             </View>
             <View>
               <Text style={styles.actionTitle}>Görüntü</Text>
-              <Text style={styles.actionText}>Fotoğraf veya video seç</Text>
+              <Text style={styles.actionText}>Video seç</Text>
             </View>
           </TouchableOpacity>
 

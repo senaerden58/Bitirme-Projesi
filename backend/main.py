@@ -1143,11 +1143,23 @@ def build_media_text_reply(emotion, media_kind, visual_summary, transcript_text)
 
 
 def log_emotion_result(label, payload):
-    print(
-        f"{label}: "
-        + json.dumps(payload, ensure_ascii=False, default=str),
-        flush=True,
-    )
+    # Write logs as UTF-8 bytes to avoid console encoding errors
+    try:
+        msg = f"{label}: " + json.dumps(payload, ensure_ascii=False, default=str)
+        try:
+            # Prefer writing bytes to the underlying buffer to bypass
+            # text encoding limitations of the terminal (e.g., cp1254).
+            sys.stdout.buffer.write(msg.encode("utf-8") + b"\n")
+            sys.stdout.buffer.flush()
+        except Exception:
+            # Fallback to a safe print using ascii-only JSON if buffer write fails
+            print(f"{label}: " + json.dumps(payload, ensure_ascii=True, default=str), flush=True)
+    except Exception:
+        # Last-resort: ensure nothing crashes logging
+        try:
+            print(f"{label}: (logging failed)", flush=True)
+        except Exception:
+            pass
 
 
 def post_n8n_payload(payload):

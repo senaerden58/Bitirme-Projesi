@@ -62,7 +62,7 @@ export default function ProfileScreen() {
   const { user, setUser } = useAuth();
   const [mode, setMode] = useState<"login" | "register">("login");
   const [summary, setSummary] = useState<EmotionSummary | null>(null);
-  const [name, setName] = useState("Sena Erden");
+  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
